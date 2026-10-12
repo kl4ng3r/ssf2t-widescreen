@@ -68,12 +68,27 @@ static void core_video(const void *data, unsigned w, unsigned h, size_t pitch)
 	}
 	g_newFrame = 1;
 }
+// The core runs once per display refresh (smooth scrolling), which is slightly faster or slower
+// than the arcade's 59.63 Hz, so its audio is resampled by g_ratio (output/input frames), which
+// tick adjusts a little to keep the buffer level steady (dynamic rate control).
+static double g_ratio = 1.0, g_pos = 0.0;
+static int16_t g_last[2];
 static size_t core_audio_batch(const int16_t *d, size_t frames)
 {
 	uint32_t w = atomic_load(&g_rw), r = atomic_load(&g_rr);
-	for (size_t i = 0; i < frames; i++) {
-		if (w - r >= RING) break;              // full: drop
-		g_ring[(w & (RING - 1)) * 2] = d[i * 2]; g_ring[(w & (RING - 1)) * 2 + 1] = d[i * 2 + 1]; w++;
+	const double step = 1.0 / g_ratio;                   // input frames per output frame
+	for (size_t i = 0; i < frames; ) {
+		// output samples between previous input frame (g_last) and d[i], at fraction g_pos
+		while (g_pos < 1.0) {
+			if (w - r >= RING) { g_pos += step; continue; }   // full: drop
+			double t = g_pos;
+			for (int c = 0; c < 2; c++)
+				g_ring[(w & (RING - 1)) * 2 + c] = (int16_t)(g_last[c] + (d[i * 2 + c] - g_last[c]) * t);
+			w++; g_pos += step;
+		}
+		g_pos -= 1.0;
+		g_last[0] = d[i * 2]; g_last[1] = d[i * 2 + 1];
+		i++;
 	}
 	atomic_store(&g_rw, w);
 	return frames;
@@ -106,7 +121,7 @@ static OSStatus audio_render(void *ref, AudioUnitRenderActionFlags *flags, const
 @implementation GameVC {
 	CALayer *_screen; CGColorSpaceRef _cs;
 	CADisplayLink *_link; AudioUnit _au;
-	BOOL _running, _paused, _menuOpen; double _rate, _fps;
+	BOOL _running, _paused, _menuOpen, _odd; double _rate, _fps;
 	int _testFrames; uint16_t _prevCombo;
 	GCVirtualController *_virtual; UIStackView *_bar; UIView *_help;
 	uint16_t _touchBits;                         // coin/start held via on-screen buttons
@@ -221,7 +236,7 @@ static OSStatus audio_render(void *ref, AudioUnitRenderActionFlags *flags, const
 	[self.view setNeedsLayout];
 	[self startAudio];
 	_link = [CADisplayLink displayLinkWithTarget:self selector:@selector(tick)];
-	_link.preferredFrameRateRange = CAFrameRateRangeMake(60, 60, 60);
+	_link.preferredFrameRateRange = CAFrameRateRangeMake(60, 60, 60);   // 120 Hz screens: see tick
 	[_link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
 	_running = YES;
 }
@@ -380,13 +395,20 @@ static uint16_t pad_bits(GCExtendedGamepad *g)
 	if (!_running || _paused) return;
 	[self readInput];
 	if (_paused) return;
-	// pace the core by the audio buffer: 60 Hz display vs 59.63 Hz game
-	uint32_t spf = (uint32_t)(_rate / _fps);
-	uint32_t avail = atomic_load(&g_rw) - atomic_load(&g_rr);
-	if (avail <= 3 * spf) {
-		retro_run();
-		if (avail < spf) retro_run();
-	}
+	// one emulated frame per display refresh; audio is stretched to match (see core_audio_batch)
+	double hz = 60.0;
+	if (_link.targetTimestamp > _link.timestamp) hz = 1.0 / (_link.targetTimestamp - _link.timestamp);
+	if (hz < 50 || hz > 130) hz = 60.0;
+	int runs = 1;
+	if (hz > 100) { _odd = !_odd; runs = _odd ? 1 : 0; hz /= 2; }   // 120 Hz screen: every other refresh
+	double spf = _rate / _fps;                                       // output frames per emulated frame
+	double fill = (double)(atomic_load(&g_rw) - atomic_load(&g_rr));
+	double target = 4 * spf;
+	double adj = (target - fill) / target * 0.005;                   // up to +-0.5 % to hold the level
+	if (adj > 0.005) adj = 0.005; if (adj < -0.005) adj = -0.005;
+	g_ratio = (_fps / hz) * (1.0 + adj);
+	if (fill < spf && runs) runs = 2;                                // underrun (e.g. after a pause): catch up once
+	for (int i = 0; i < runs; i++) retro_run();
 	if (g_newFrame && g_frame) {
 		g_newFrame = 0;
 		NSData *d = [NSData dataWithBytes:g_frame length:g_fw * g_fh * 4];

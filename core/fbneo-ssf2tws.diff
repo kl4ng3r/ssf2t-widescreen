@@ -69,10 +69,10 @@ index 306bb91..dc291ff 100644
  			t = BURN_ENDIAN_SWAP_INT16(pst[0]);
  			t <<= 6;										// Get real tile address
 diff --git a/src/burn/drv/capcom/d_cps2.cpp b/src/burn/drv/capcom/d_cps2.cpp
-index 099ded2..69d8cca 100644
+index 099ded2..0a2045e 100644
 --- a/src/burn/drv/capcom/d_cps2.cpp
 +++ b/src/burn/drv/capcom/d_cps2.cpp
-@@ -9918,6 +9918,663 @@ static INT32 Ssf2tInit()
+@@ -9918,6 +9918,679 @@ static INT32 Ssf2tInit()
  	return nRet;
  }
  
@@ -129,7 +129,7 @@ index 099ded2..69d8cca 100644
 +			pBurnDraw = bg; nBurnLayer = mask; CpsDraw();           // background layers only
 +			if (spr && clr && keepsprites) {
 +				pBurnDraw = spr; nBurnLayer = 1; CpsDraw();         // sprites only
-+				pBurnDraw = clr; nBurnLayer = 0; CpsDraw();         // nothing (backdrop only)
++				memset(clr, 0, need);   // CPS2 backdrop is always black (CpsClearScreen)
 +			}
 +			pBurnDraw = save; nBurnLayer = saveLayer;
 +			if (verify) {
@@ -279,26 +279,23 @@ index 099ded2..69d8cca 100644
 +// In fights: pixels in the side strips that no layer covers (backdrop showing through, e.g. the
 +// edges of Dee Jay's stage) are filled by mirroring the stage background (layers only, no
 +// sprites) across the edge of the gap, row by row.
-+static void Ssf2twsFillFightHoles()
++template <typename T>
++static void Ssf2twsFillFightHolesT()
 +{
-+	if (pBurnDraw == NULL || nCpsScreenWidth < 448 + 8) return;
-+	const INT32 W = nCpsScreenWidth, H = nCpsScreenHeight, bpp = nBurnBpp, side = (W - 384) / 2;
-+	static UINT8 *clr = NULL, *lay = NULL; static INT32 sz = 0;
++	const INT32 W = nCpsScreenWidth, H = nCpsScreenHeight, side = (W - 384) / 2;
++	const INT32 pitch = nBurnPitch / sizeof(T);
++	static UINT8 *lay = NULL; static INT32 sz = 0;
 +	INT32 need = nBurnPitch * H;
-+	if (need > sz) { if (clr) BurnFree(clr); if (lay) BurnFree(lay); clr = (UINT8*)BurnMalloc(need); lay = (UINT8*)BurnMalloc(need); sz = need; }
-+	if (!clr || !lay) return;
-+	UINT8 *save = pBurnDraw; INT32 saveLayer = nBurnLayer;
-+	pBurnDraw = clr; nBurnLayer = 0; CpsDraw();                 // backdrop only
-+	pBurnDraw = save; nBurnLayer = saveLayer;
-+	UINT32 bd = 0; memcpy(&bd, clr, bpp);
-+	// any holes in the strips?
-+	INT32 holes = 0;
-+	for (INT32 y = 0; y < H && !holes; y++) {
-+		UINT8 *row = pBurnDraw + y * nBurnPitch;
-+		for (INT32 x = 0; x < side && !holes; x++) {
-+			UINT32 a = 0, b = 0; memcpy(&a, row + x * bpp, bpp); memcpy(&b, row + (W - 1 - x) * bpp, bpp);
-+			if (a == bd || b == bd) holes = 1;
-+		}
++	if (need > sz) { if (lay) BurnFree(lay); lay = (UINT8*)BurnMalloc(need); sz = need; }
++	if (!lay) return;
++	T *fb = (T*)pBurnDraw;
++	const T bd = 0;                                             // CPS2 backdrop is black (CpsClearScreen)
++	// rows with holes in the strips
++	static UINT8 holerow[512]; INT32 holes = 0;
++	for (INT32 y = 0; y < H; y++) {
++		T *row = fb + y * pitch; INT32 h = 0;
++		for (INT32 x = 0; x < side && !h; x++) h = (row[x] == bd) | (row[W - 1 - x] == bd);
++		holerow[y] = h; holes |= h;
 +	}
 +	if (!holes) return;
 +	// a hole means the bottom-most layer has no art there: mirror only that layer (mirroring the
@@ -311,38 +308,45 @@ index 099ded2..69d8cca 100644
 +			if (l > 0 && (lc & CpsLayEn[l])) { holemask = 1 << l; break; }
 +		}
 +	}
++	UINT8 *save = pBurnDraw; INT32 saveLayer = nBurnLayer;
 +	pBurnDraw = lay; nBurnLayer = holemask; CpsDraw();          // bottom background layer only
 +	pBurnDraw = save; nBurnLayer = saveLayer;
++	const T *ly = (const T*)lay;
 +	for (INT32 y = 0; y < H; y++) {
-+		UINT8 *row = pBurnDraw + y * nBurnPitch, *src = lay + y * nBurnPitch;
++		if (!holerow[y]) continue;
++		T *row = fb + y * pitch; const T *src = ly + y * pitch;
 +		// mirror the bottom layer across the edge of its own art in this row (a straight edge, so
 +		// the mirrored part continues it without steps)
 +		INT32 L = W / 2, R = W / 2 - 1;
-+		for (; L > 0; L--) { UINT32 v = 0; memcpy(&v, src + (L - 1) * bpp, bpp); if (v == bd) break; }
-+		for (; R < W - 1; R++) { UINT32 v = 0; memcpy(&v, src + (R + 1) * bpp, bpp); if (v == bd) break; }
++		while (L > 0 && src[L - 1] != bd) L--;
++		while (R < W - 1 && src[R + 1] != bd) R++;
 +		if (R < L) continue;
 +		for (INT32 k = 0; k < 2 * side; k++) {
 +			INT32 x = k < side ? k : W - 2 * side + k;
-+			UINT32 c = 0; memcpy(&c, row + x * bpp, bpp);
-+			if (c != bd) continue;
++			if (row[x] != bd) continue;
 +			INT32 sx = (x < L) ? 2 * L - 1 - x : (x > R) ? 2 * R + 1 - x : -1;
 +			if (sx < L || sx > R) continue;
-+			UINT32 v = 0; memcpy(&v, src + sx * bpp, bpp);
-+			if (v != bd) memcpy(row + x * bpp, &v, bpp);
++			if (src[sx] != bd) row[x] = src[sx];
 +		}
 +	}
 +	for (INT32 pass = 0; pass < 2; pass++) {
 +		for (INT32 y = 0; y < H; y++) {
 +			INT32 yy = pass ? (H - 1 - y) : y, ny = pass ? yy + 1 : yy - 1;
 +			if (ny < 0 || ny >= H) continue;
-+			UINT8 *row = pBurnDraw + yy * nBurnPitch, *nb = pBurnDraw + ny * nBurnPitch;
++			T *row = fb + yy * pitch; const T *nb = fb + ny * pitch;
 +			for (INT32 k = 0; k < 2 * side; k++) {
 +				INT32 x = k < side ? k : W - 2 * side + k;
-+				UINT32 c = 0, d = 0; memcpy(&c, row + x * bpp, bpp); memcpy(&d, nb + x * bpp, bpp);
-+				if (c == bd && d != bd) memcpy(row + x * bpp, &d, bpp);
++				if (row[x] == bd && nb[x] != bd) row[x] = nb[x];
 +			}
 +		}
 +	}
++}
++
++static void Ssf2twsFillFightHoles()
++{
++	if (pBurnDraw == NULL || nCpsScreenWidth < 448 + 8) return;
++	if (nBurnBpp == 4) Ssf2twsFillFightHolesT<UINT32>();
++	else if (nBurnBpp == 2) Ssf2twsFillFightHolesT<UINT16>();
 +}
 +
 +// Super Combo finish: the burst (scroll2/scroll3) is drawn only in the middle 384 px. Re-compose
@@ -376,7 +380,7 @@ index 099ded2..69d8cca 100644
 +	UINT32 saveSpr = nSpriteEnable;
 +	pBurnDraw = bg;  nBurnLayer = 0x0c; nSpriteEnable = 0; CpsDraw();                        // burst layers
 +	pBurnDraw = fg;  nBurnLayer = fgmask; nSpriteEnable = saveSpr & (0xff << (pmax + 1)); CpsDraw();   // foreground
-+	pBurnDraw = clr; nBurnLayer = 0x00; nSpriteEnable = 0; CpsDraw();                        // backdrop only
++	memset(clr, 0, need);                                                                       // backdrop (black)
 +	pBurnDraw = save; nBurnLayer = saveLayer; nSpriteEnable = saveSpr;
 +	for (INT32 y = 0; y < H; y++) {
 +		UINT8 *row = pBurnDraw + y * nBurnPitch, *b = bg + y * nBurnPitch, *f = fg + y * nBurnPitch, *c = clr + y * nBurnPitch;
@@ -417,7 +421,7 @@ index 099ded2..69d8cca 100644
 +	}
 +	if (!l1 || !fr || !clr) return;
 +	UINT8 *save = pBurnDraw; INT32 sl = nBurnLayer;
-+	pBurnDraw = clr; nBurnLayer = 0x00; CpsDraw();     // backdrop only
++	memset(clr, 0, need);                               // backdrop (black)
 +	pBurnDraw = l1;  nBurnLayer = 0x02; CpsDraw();     // scroll1 only
 +	pBurnDraw = fr;  nBurnLayer = 0x05; CpsDraw();     // sprites + scroll2 (in front)
 +	pBurnDraw = save; nBurnLayer = sl;
@@ -619,10 +623,12 @@ index 099ded2..69d8cca 100644
 +	wsValid = 1;
 +}
 +
++static INT32 s1Frame;
 +static void Ssf2twsPostDraw()
 +{
 +	Ssf2twsMaskStrips();
 +	Ssf2twsGlitchFilter();
++	s1Frame++;
 +}
 +
 +// Force the game's "Demo Sound" option on (attract mode with music and effects) by setting
@@ -690,7 +696,17 @@ index 099ded2..69d8cca 100644
 +}
 +static inline INT32 s1floordiv(INT32 a, INT32 b) { return (a >= 0) ? a / b : -((-a + b - 1) / b); }
 +
++static INT32 s1CacheFrame = -1, s1CacheX = 0; static UINT8 *s1CacheBase = NULL, *s1CacheWide = NULL;
++static UINT8 *Ssf2twsScr1Compute(UINT8 *base, INT32 nScrX);
 +static UINT8 *Ssf2twsScr1(UINT8 *base, INT32 nScrX)
++{
++	// the frame's extra renders (side strips) draw the same tile map again: reuse the result
++	if (s1CacheFrame == s1Frame && s1CacheBase == base && s1CacheX == nScrX) { CpsScr1Wide = s1CacheWide; return base; }
++	UINT8 *r = Ssf2twsScr1Compute(base, nScrX);
++	s1CacheFrame = s1Frame; s1CacheBase = base; s1CacheX = nScrX; s1CacheWide = CpsScr1Wide;
++	return r;
++}
++static UINT8 *Ssf2twsScr1Compute(UINT8 *base, INT32 nScrX)
 +{
 +	CpsScr1Wide = NULL;
 +	if (CpsRamFF[0x8ece ^ 1] != 1 || CpsRamFF[0x8005 ^ 1] > 8) return base;      // fights only
@@ -736,7 +752,7 @@ index 099ded2..69d8cca 100644
  static INT32 XmcotaInit()
  {
  	Xmcota = 1;
-@@ -12413,6 +13070,16 @@ struct BurnDriver BurnDrvCpsSsf2t = {
+@@ -12413,6 +13086,16 @@ struct BurnDriver BurnDrvCpsSsf2t = {
  	&CpsRecalcPal, 0x1000, 384, 224, 4, 3
  };
  
