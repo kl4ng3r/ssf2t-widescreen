@@ -47,10 +47,10 @@ index 306bb91..dc291ff 100644
  			t = BURN_ENDIAN_SWAP_INT16(pst[0]);
  			t <<= 6;										// Get real tile address
 diff --git a/src/burn/drv/capcom/d_cps2.cpp b/src/burn/drv/capcom/d_cps2.cpp
-index 099ded2..3c31609 100644
+index 099ded2..dbe4462 100644
 --- a/src/burn/drv/capcom/d_cps2.cpp
 +++ b/src/burn/drv/capcom/d_cps2.cpp
-@@ -9918,6 +9918,513 @@ static INT32 Ssf2tInit()
+@@ -9918,6 +9918,545 @@ static INT32 Ssf2tInit()
  	return nRet;
  }
  
@@ -90,7 +90,9 @@ index 099ded2..3c31609 100644
 +#define SSF2TWS_BG_LAYERS 0x0c   // scroll2 + scroll3 (portraits are sprites, text is scroll1)
 +// Mirror the background layers (bgmask) of the original picture's outer 64 px into each strip.
 +// With keepsprites, the game's own sprite pixels in the strips are drawn on top.
-+static void Ssf2twsMirrorStrips(INT32 bgmask, INT32 keepsprites, INT32 wrap = 0)
++// verify: only mirror if the background is actually what the picture shows just inside its edges
++// (returns 0 without touching the frame otherwise, e.g. while the scene fades or wipes to another)
++static INT32 Ssf2twsMirrorStrips(INT32 bgmask, INT32 keepsprites, INT32 wrap = 0, INT32 verify = 0)
 +{
 +	const INT32 H = nCpsScreenHeight, bpp = nBurnBpp;
 +	const INT32 side = (nCpsScreenWidth - 384) / 2;
@@ -108,6 +110,19 @@ index 099ded2..3c31609 100644
 +				pBurnDraw = clr; nBurnLayer = 0; CpsDraw();         // nothing (backdrop only)
 +			}
 +			pBurnDraw = save; nBurnLayer = saveLayer;
++			if (verify) {
++				INT32 n = 0, ok = 0;
++				for (INT32 y = 0; y < H; y++) {
++					UINT8 *row = pBurnDraw + y * nBurnPitch, *src = bg + y * nBurnPitch;
++					UINT8 *sp = (spr && keepsprites) ? spr + y * nBurnPitch : NULL, *cl = clr ? clr + y * nBurnPitch : NULL;
++					for (INT32 k = 0; k < 16; k++) {
++						INT32 x = k < 8 ? side + k : side + 376 + (k - 8);
++						if (sp && cl && memcmp(sp + x * bpp, cl + x * bpp, bpp)) continue;   // sprite in front
++						n++; ok += !memcmp(row + x * bpp, src + x * bpp, bpp);
++					}
++				}
++				if (n == 0 || ok * 10 < n * 9) return 0;
++			}
 +			for (INT32 y = 0; y < H; y++) {
 +				UINT8 *row = pBurnDraw + y * nBurnPitch, *src = bg + y * nBurnPitch;
 +				UINT8 *sp = (spr && keepsprites) ? spr + y * nBurnPitch : NULL, *cl = clr ? clr + y * nBurnPitch : NULL;
@@ -127,6 +142,7 @@ index 099ded2..3c31609 100644
 +				#undef SSF2TWS_SPR
 +			}
 +		}
++	return 1;
 +}
 +
 +
@@ -176,9 +192,8 @@ index 099ded2..3c31609 100644
 +	// (background layers only: the frame is re-rendered without the portrait layer into a scratch
 +	//  buffer, and the strips are mirrored from that, so the characters are never mirrored)
 +	if (CpsRamFF[0x02d7 ^ 1] == 240 && CpsRamFF[0x02e7 ^ 1] == 12 && CpsRamFF[0x8005 ^ 1] == 2 && CpsRamFF[0x8009 ^ 1] == 2) {
-+		Ssf2twsMirrorStrips(SSF2TWS_BG_LAYERS, 1);
-+		return;
-+	}
++		if (Ssf2twsMirrorStrips(SSF2TWS_BG_LAYERS, 1, 0, 1)) return;
++	} else
 +	// Next Fighter screen: tile the background like character select. The portrait row's band
 +	// (rows 160-191) would repeat the portraits, so there the strips take the background pattern
 +	// from one pattern period (192 px) further up the same layer, which continues it seamlessly.
@@ -433,8 +448,25 @@ index 099ded2..3c31609 100644
 +	if (need > keepsize) { if (keep) BurnFree(keep); keep = (UINT8*)BurnMalloc(need); keepsize = need; shown = -1; }
 +	if (!keep) return;
 +
++	// the new picture is flat at its inner edges (e.g. a hard cut to a plain background): the
++	// previous strips would not fit it, so switch at once
++	INT32 flat = 0;
++	{
++		INT32 rows = 0;
++		for (INT32 y = 0; y < H; y++) {
++			UINT8 *row = pBurnDraw + y * nBurnPitch;
++			UINT32 r0 = 0; memcpy(&r0, row + side * bpp, bpp);
++			INT32 same = 1;
++			for (INT32 k = 0; k < 8 && same; k++) {
++				INT32 x = k < 4 ? side + k : side + 380 + (k - 4);
++				UINT32 v = 0; memcpy(&v, row + x * bpp, bpp); if (v != r0) same = 0;
++			}
++			rows += same;
++		}
++		flat = rows * 10 >= H * 9;
++	}
 +	INT32 hold = 0;
-+	if (shown != -1 && st != shown && (shown == 0 || st == 2)) {
++	if (shown != -1 && st != shown && (shown == 0 || st == 2) && !(shown == 0 && flat)) {
 +		if (pend == st) pendn++; else { pend = st; pendn = 1; }
 +		if (pendn < 3) hold = 1;
 +	}
@@ -564,7 +596,7 @@ index 099ded2..3c31609 100644
  static INT32 XmcotaInit()
  {
  	Xmcota = 1;
-@@ -12413,6 +12920,16 @@ struct BurnDriver BurnDrvCpsSsf2t = {
+@@ -12413,6 +12952,16 @@ struct BurnDriver BurnDrvCpsSsf2t = {
  	&CpsRecalcPal, 0x1000, 384, 224, 4, 3
  };
  
