@@ -1,13 +1,14 @@
 diff --git a/src/burn/drv/capcom/cps.h b/src/burn/drv/capcom/cps.h
-index 2f490b1..7e0396b 100644
+index 2f490b1..34c94d8 100644
 --- a/src/burn/drv/capcom/cps.h
 +++ b/src/burn/drv/capcom/cps.h
-@@ -338,6 +338,8 @@ extern INT32 nCpsGlobalYOffset;
+@@ -338,6 +338,9 @@ extern INT32 nCpsGlobalYOffset;
  void DrawFnInit();
  INT32  CpsDraw();
  INT32  CpsRedraw();
 +extern UINT8* (*CpsScr1Hook)(UINT8 *Base, INT32 nScrX);
 +extern UINT8 *CpsScr1Wide;
++extern void (*CpsPostDrawHook)();
  
  #define BURN_SND_QSND_OUTPUT_1			0
  #define BURN_SND_QSND_OUTPUT_2			1
@@ -34,6 +35,27 @@ index 99c7014..066f474 100644
  	CpsScr1DrawDoX(Find, nScrX, nScrY);
  	return 0;
  }
+diff --git a/src/burn/drv/capcom/cps_run.cpp b/src/burn/drv/capcom/cps_run.cpp
+index ed1ab37..95042e4 100644
+--- a/src/burn/drv/capcom/cps_run.cpp
++++ b/src/burn/drv/capcom/cps_run.cpp
+@@ -251,6 +251,8 @@ INT32 CpsRunExit()
+ 	return 0;
+ }
+ 
++void (*CpsPostDrawHook)() = NULL;
++
+ inline static void CopyCpsReg(INT32 i)
+ {
+ 	memcpy(CpsSaveReg[i], CpsReg, 0x0100);
+@@ -534,6 +536,7 @@ INT32 Cps2Frame()
+ 	SekSetIRQLine(2, CPU_IRQSTATUS_AUTO);				// VBlank
+ 	if (pBurnDraw) {
+ 		CpsDraw();
++		if (CpsPostDrawHook) CpsPostDrawHook();			// widescreen hack: same video state as the frame
+ 	}
+ 
+ 	LatchCpsFrg();										// Latch the f-regs
 diff --git a/src/burn/drv/capcom/cps_scr.cpp b/src/burn/drv/capcom/cps_scr.cpp
 index 306bb91..dc291ff 100644
 --- a/src/burn/drv/capcom/cps_scr.cpp
@@ -47,10 +69,10 @@ index 306bb91..dc291ff 100644
  			t = BURN_ENDIAN_SWAP_INT16(pst[0]);
  			t <<= 6;										// Get real tile address
 diff --git a/src/burn/drv/capcom/d_cps2.cpp b/src/burn/drv/capcom/d_cps2.cpp
-index 099ded2..dbe4462 100644
+index 099ded2..cc71c81 100644
 --- a/src/burn/drv/capcom/d_cps2.cpp
 +++ b/src/burn/drv/capcom/d_cps2.cpp
-@@ -9918,6 +9918,545 @@ static INT32 Ssf2tInit()
+@@ -9918,6 +9918,603 @@ static INT32 Ssf2tInit()
  	return nRet;
  }
  
@@ -413,6 +435,63 @@ index 099ded2..dbe4462 100644
 +	}
 +}
 +
++// While the game fades or blanks the picture (scene changes, fight start/end), it clears the
++// middle 384 px to black row by row, but whatever fills the side strips would stay visible.
++// Rows whose inner edge (8 px just inside the 384 px area) is uniformly black are made black
++// in the strip on that side too (only in runs of 4+ rows, so ordinary dark art is unaffected).
++static void Ssf2twsCurtain()
++{
++	if (pBurnDraw == NULL || nCpsScreenWidth < 448 + 8) return;
++	const INT32 W = nCpsScreenWidth, H = nCpsScreenHeight, bpp = nBurnBpp, side = (W - 384) / 2;
++	// only while a blank-out is actually in progress: at least 40% of all rows black at both edges
++	{
++		INT32 rows = 0;
++		for (INT32 y = 0; y < H; y++) {
++			UINT8 *row = pBurnDraw + y * nBurnPitch; INT32 ok = 1;
++			for (INT32 k = 0; k < 16 && ok; k++) {
++				INT32 x = k < 8 ? side + k : side + 368 + k;
++				UINT32 v = 0; memcpy(&v, row + x * bpp, bpp);
++				UINT32 r = (v >> 16) & 0xff, g = (v >> 8) & 0xff, b = v & 0xff;
++				if (bpp == 2) { r = (v >> 11) << 3; g = ((v >> 5) & 63) << 2; b = (v & 31) << 3; }
++				if (r + g + b >= 24) ok = 0;
++			}
++			rows += ok;
++		}
++		if (rows * 10 < H * 4) return;
++		if (rows * 10 >= H * 6) {                       // mostly blank: the whole strips go black
++			for (INT32 y = 0; y < H; y++) {
++				UINT8 *row = pBurnDraw + y * nBurnPitch;
++				memset(row, 0, side * bpp); memset(row + (side + 384) * bpp, 0, side * bpp);
++			}
++			return;
++		}
++	}
++	for (INT32 s = 0; s < 2; s++) {
++		const INT32 ex = s ? side + 376 : side, fx = s ? side + 384 : 0;
++		INT32 run = 0;
++		for (INT32 y = 0; y <= H; y++) {
++			INT32 cur = 0;
++			if (y < H) {
++				UINT8 *row = pBurnDraw + y * nBurnPitch;
++				UINT32 c0 = 0; memcpy(&c0, row + ex * bpp, bpp);
++				UINT32 r = (c0 >> 16) & 0xff, g = (c0 >> 8) & 0xff, b = c0 & 0xff;
++				if (bpp == 2) { r = (c0 >> 11) << 3; g = ((c0 >> 5) & 63) << 2; b = (c0 & 31) << 3; }
++				cur = (r + g + b) < 24;
++				for (INT32 k = 1; k < 8 && cur; k++) { UINT32 v = 0; memcpy(&v, row + (ex + k) * bpp, bpp); if (v != c0) cur = 0; }
++			}
++			if (cur) { run++; continue; }
++			if (run >= 4) {
++				for (INT32 yy = y - run; yy < y; yy++) {
++					UINT8 *row = pBurnDraw + yy * nBurnPitch;
++					UINT32 c0 = 0; memcpy(&c0, row + ex * bpp, bpp);
++					for (INT32 x = 0; x < side; x++) memcpy(row + (fx + x) * bpp, &c0, bpp);
++				}
++			}
++			run = 0;
++		}
++	}
++}
++
 +// Debounce: the side strips may only switch from showing a picture (mirrored/tiled background)
 +// to a flat colour, or to plain black, once the new state has held for 3 frames. Until then the
 +// previous strips are kept, so one- or two-frame scene wipes don't flash bars on the sides.
@@ -429,7 +508,7 @@ index 099ded2..dbe4462 100644
 +	if (CpsRamFF[0x8ece ^ 1] == 0 && CpsRamFF[0x8005 ^ 1] == 4 && CpsRamFF[0x8009 ^ 1] == 10) {
 +		shown = -1; pend = -1; pendn = 0; Ssf2twsStretchFinish(); return;
 +	}
-+	if ((CpsRamFF[0x8ece ^ 1] == 1 && CpsRamFF[0x8005 ^ 1] <= 8) || (CpsRamFF[0x8005 ^ 1] == 4 && CpsRamFF[0x8009 ^ 1] >= 6)) { shown = -1; pend = -1; pendn = 0; Ssf2twsFillFightHoles(); if (CpsRamFF[0x8c4f ^ 1] == 14) Ssf2twsFeiLongFill(); return; }
++	if ((CpsRamFF[0x8ece ^ 1] == 1 && CpsRamFF[0x8005 ^ 1] <= 8) || (CpsRamFF[0x8005 ^ 1] == 4 && CpsRamFF[0x8009 ^ 1] >= 6)) { shown = -1; pend = -1; pendn = 0; Ssf2twsFillFightHoles(); if (CpsRamFF[0x8c4f ^ 1] == 14) Ssf2twsFeiLongFill(); Ssf2twsCurtain(); return; }
 +	if (Ssf2twsIsVS()) { shown = -1; pend = -1; pendn = 0; return; }
 +	Ssf2twsMaskStripsRaw();
 +
@@ -475,6 +554,7 @@ index 099ded2..dbe4462 100644
 +			UINT8 *row = pBurnDraw + y * nBurnPitch, *k = keep + y * 2 * side * bpp;
 +			memcpy(row, k, side * bpp); memcpy(row + (side + 384) * bpp, k + side * bpp, side * bpp);
 +		}
++		Ssf2twsCurtain();
 +		return;
 +	}
 +	pend = -1; pendn = 0; shown = st;
@@ -482,6 +562,7 @@ index 099ded2..dbe4462 100644
 +		UINT8 *row = pBurnDraw + y * nBurnPitch, *k = keep + y * 2 * side * bpp;
 +		memcpy(k, row, side * bpp); memcpy(k + side * bpp, row + (side + 384) * bpp, side * bpp);
 +	}
++	Ssf2twsCurtain();
 +}
 +
 +// Force the game's "Demo Sound" option on (attract mode with music and effects) by setting
@@ -495,8 +576,7 @@ index 099ded2..dbe4462 100644
 +static INT32 Ssf2twsFrame()
 +{
 +	Ssf2twsDemoSound();
-+	INT32 nRet = Cps2Frame();
-+	Ssf2twsMaskStrips();
++	INT32 nRet = Cps2Frame();                          // strips are done in the post-draw hook
 +	return nRet;
 +}
 +
@@ -582,21 +662,21 @@ index 099ded2..dbe4462 100644
 +static INT32 DrvExit();
 +static INT32 Ssf2twsExit()
 +{
-+	CpsScr1Hook = NULL; CpsScr1Wide = NULL;
++	CpsScr1Hook = NULL; CpsScr1Wide = NULL; CpsPostDrawHook = NULL;
 +	return DrvExit();
 +}
 +
 +static INT32 Ssf2twsInit()
 +{
 +	INT32 nRet = Ssf2tInit();
-+	if (nRet == 0) { Ssf2twsApplyPatches(); CpsScr1Hook = Ssf2twsScr1; CpsScr1Wide = NULL; }
++	if (nRet == 0) { Ssf2twsApplyPatches(); CpsScr1Hook = Ssf2twsScr1; CpsScr1Wide = NULL; CpsPostDrawHook = Ssf2twsMaskStrips; }
 +	return nRet;
 +}
 +
  static INT32 XmcotaInit()
  {
  	Xmcota = 1;
-@@ -12413,6 +12952,16 @@ struct BurnDriver BurnDrvCpsSsf2t = {
+@@ -12413,6 +13010,16 @@ struct BurnDriver BurnDrvCpsSsf2t = {
  	&CpsRecalcPal, 0x1000, 384, 224, 4, 3
  };
  
