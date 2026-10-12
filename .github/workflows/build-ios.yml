@@ -1,0 +1,55 @@
+name: Build iOS app (unsigned .ipa)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get FinalBurn Neo (libretro) at the base commit and apply the widescreen patch
+        run: |
+          git clone --filter=blob:none https://github.com/libretro/FBNeo.git fbneo
+          cd fbneo
+          git checkout "$(cat ../core/BASE_COMMIT.txt)"
+          git apply ../core/fbneo-ssf2tws.diff
+          cp ../core/ssf2tws_patches.h src/burn/drv/capcom/
+
+      - name: Build the core as a static library for iOS (arm64, iOS 17+)
+        run: |
+          cd fbneo/src/burner/libretro
+          make SUBSET=cps12 generate-files
+          CCI="$(xcrun -sdk iphoneos -f clang) -isysroot $(xcrun -sdk iphoneos --show-sdk-path) -arch arm64 -miphoneos-version-min=17.0"
+          CXXI="$(xcrun -sdk iphoneos -f clang++) -isysroot $(xcrun -sdk iphoneos --show-sdk-path) -arch arm64 -miphoneos-version-min=17.0"
+          make -j"$(sysctl -n hw.ncpu)" SUBSET=cps12 platform=ios-arm64 STATIC_LINKING=1 \
+               CC="$CCI" CXX="$CXXI" AR="$(xcrun -sdk iphoneos -f ar)"
+          mkdir -p "$GITHUB_WORKSPACE/ios/lib"
+          cp fbneo_cps12_libretro_ios.dylib "$GITHUB_WORKSPACE/ios/lib/libfbneo.a"
+          file "$GITHUB_WORKSPACE/ios/lib/libfbneo.a"
+
+      - name: Generate the Xcode project and build the app
+        run: |
+          brew install xcodegen
+          cd ios
+          xcodegen generate
+          xcodebuild -project SSF2TWS.xcodeproj -scheme SSF2TWS -configuration Release \
+                     -sdk iphoneos -destination 'generic/platform=iOS' \
+                     CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+                     SYMROOT="$PWD/build" build
+
+      - name: Package unsigned .ipa
+        run: |
+          cd ios
+          mkdir -p Payload
+          cp -R build/Release-iphoneos/SSF2TWS.app Payload/
+          zip -qry SSF2T-Widescreen-unsigned.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SSF2T-Widescreen-ipa
+          path: ios/SSF2T-Widescreen-unsigned.ipa
