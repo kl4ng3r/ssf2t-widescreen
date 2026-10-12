@@ -1,0 +1,601 @@
+diff --git a/src/burn/drv/capcom/cps.h b/src/burn/drv/capcom/cps.h
+index 2f490b1..7e0396b 100644
+--- a/src/burn/drv/capcom/cps.h
++++ b/src/burn/drv/capcom/cps.h
+@@ -338,6 +338,8 @@ extern INT32 nCpsGlobalYOffset;
+ void DrawFnInit();
+ INT32  CpsDraw();
+ INT32  CpsRedraw();
++extern UINT8* (*CpsScr1Hook)(UINT8 *Base, INT32 nScrX);
++extern UINT8 *CpsScr1Wide;
+ 
+ #define BURN_SND_QSND_OUTPUT_1			0
+ #define BURN_SND_QSND_OUTPUT_2			1
+diff --git a/src/burn/drv/capcom/cps_draw.cpp b/src/burn/drv/capcom/cps_draw.cpp
+index 99c7014..066f474 100644
+--- a/src/burn/drv/capcom/cps_draw.cpp
++++ b/src/burn/drv/capcom/cps_draw.cpp
+@@ -7,7 +7,9 @@ static INT32 LayerCont;
+ INT32 nStartline, nEndline;
+ INT32 nRasterline[MAX_RASTER + 2];
+ 
+-INT32 nCpsLcReg = 0;						// Address of layer controller register
++INT32 nCpsLcReg = 0;
++UINT8* (*CpsScr1Hook)(UINT8 *Base, INT32 nScrX) = NULL;
++UINT8 *CpsScr1Wide = NULL;   // widescreen hack: 128-column scroll1 map (column c at c*256), or NULL
+ INT32 CpsLayEn[6] = {0, 0, 0, 0, 0, 0};	// bits for layer enable
+ INT32 MaskAddr[4] = {0, 0, 0, 0};
+ 
+@@ -93,6 +95,7 @@ static INT32 DrawScroll1(INT32 i)
+ 	if (Find == NULL) {
+ 		return 1;
+ 	}
++	if (CpsScr1Hook) Find = CpsScr1Hook(Find, nScrX);   // widescreen hack: virtual wide scroll1 map
+ 	CpsScr1DrawDoX(Find, nScrX, nScrY);
+ 	return 0;
+ }
+diff --git a/src/burn/drv/capcom/cps_scr.cpp b/src/burn/drv/capcom/cps_scr.cpp
+index 306bb91..dc291ff 100644
+--- a/src/burn/drv/capcom/cps_scr.cpp
++++ b/src/burn/drv/capcom/cps_scr.cpp
+@@ -107,6 +107,7 @@ INT32 Cps2Scr1Draw(UINT8 *Base, INT32 sx, INT32 sy)
+ 			p = ((fy & 0x20) << 8) | ((fx & 0x3F) << 7) | ((fy & 0x1F) << 2);
+ 			p &= 0x3FFF;
+ 			pst = (UINT16 *)(Base + p);
++			if (CpsScr1Wide) pst = (UINT16 *)(CpsScr1Wide + ((fx & 0x7F) << 8) + ((fy & 0x20) << 2) + ((fy & 0x1F) << 2));
+ 
+ 			t = BURN_ENDIAN_SWAP_INT16(pst[0]);
+ 			t <<= 6;										// Get real tile address
+diff --git a/src/burn/drv/capcom/d_cps2.cpp b/src/burn/drv/capcom/d_cps2.cpp
+index 099ded2..3c31609 100644
+--- a/src/burn/drv/capcom/d_cps2.cpp
++++ b/src/burn/drv/capcom/d_cps2.cpp
+@@ -9918,6 +9918,513 @@ static INT32 Ssf2tInit()
+ 	return nRet;
+ }
+ 
++// ---- Widescreen (16:9, 512x224) variant of ssf2t (World 940223) ----
++// Patches are applied to the decrypted program in memory after load. Each patch
++// is verified against the expected original word first; if the ROM revision does
++// not match, nothing is patched (widescreen view only).
++struct WsPatch { UINT32 addr; UINT16 orig; UINT16 val; INT32 data; };
++#include "ssf2tws_patches.h"
++
++static INT32 Ssf2twsApplyPatches()
++{
++	INT32 n = 0, bad = 0;
++	for (INT32 i = 0; Ssf2twsPatches[i].addr; i++) {
++		UINT8 *b = Ssf2twsPatches[i].data ? CpsRom : CpsCode;
++		UINT16 *w = (UINT16*)(b + Ssf2twsPatches[i].addr);
++		if (BURN_ENDIAN_SWAP_INT16(*w) != Ssf2twsPatches[i].orig) {
++			bprintf(PRINT_ERROR, _T("ssf2tws: mismatch at %06x: %04x\n"), Ssf2twsPatches[i].addr, BURN_ENDIAN_SWAP_INT16(*w));
++			bad++;
++		}
++		n++;
++	}
++	if (bad) { bprintf(PRINT_ERROR, _T("ssf2tws: %d of %d patch sites do not match, game patches skipped\n"), bad, n); return 1; }
++	for (INT32 i = 0; Ssf2twsPatches[i].addr; i++) {
++		UINT8 *b = Ssf2twsPatches[i].data ? CpsRom : CpsCode;
++		UINT16 *w = (UINT16*)(b + Ssf2twsPatches[i].addr);
++		*w = BURN_ENDIAN_SWAP_INT16(Ssf2twsPatches[i].val);
++	}
++	bprintf(PRINT_NORMAL, _T("ssf2tws: applied %d widescreen patch words\n"), n);
++	return 0;
++}
++
++// Outside fights the game only draws the middle 384 px, so the side strips would show stale
++// video memory. When the camera object (0xFF8ECE) is inactive, fill each strip per row with the
++// screen's solid background colour if that edge is a solid colour, otherwise with black.
++#define SSF2TWS_SEL_LAYERS 0x08   // select screen: scroll3 = patterned background (portraits are scroll2)
++#define SSF2TWS_BG_LAYERS 0x0c   // scroll2 + scroll3 (portraits are sprites, text is scroll1)
++// Mirror the background layers (bgmask) of the original picture's outer 64 px into each strip.
++// With keepsprites, the game's own sprite pixels in the strips are drawn on top.
++static void Ssf2twsMirrorStrips(INT32 bgmask, INT32 keepsprites, INT32 wrap = 0)
++{
++	const INT32 H = nCpsScreenHeight, bpp = nBurnBpp;
++	const INT32 side = (nCpsScreenWidth - 384) / 2;
++		static UINT8 *bg = NULL; static INT32 bgsize = 0;
++		INT32 need = nBurnPitch * H;
++		if (need > bgsize) { if (bg) BurnFree(bg); bg = (UINT8*)BurnMalloc(need); bgsize = need; }
++		if (bg) {
++			INT32 mask = bgmask;
++			static UINT8 *spr = NULL, *clr = NULL; static INT32 sprsize = 0;
++			if (need > sprsize) { if (spr) BurnFree(spr); if (clr) BurnFree(clr); spr = (UINT8*)BurnMalloc(need); clr = (UINT8*)BurnMalloc(need); sprsize = need; }
++			UINT8 *save = pBurnDraw; INT32 saveLayer = nBurnLayer;
++			pBurnDraw = bg; nBurnLayer = mask; CpsDraw();           // background layers only
++			if (spr && clr && keepsprites) {
++				pBurnDraw = spr; nBurnLayer = 1; CpsDraw();         // sprites only
++				pBurnDraw = clr; nBurnLayer = 0; CpsDraw();         // nothing (backdrop only)
++			}
++			pBurnDraw = save; nBurnLayer = saveLayer;
++			for (INT32 y = 0; y < H; y++) {
++				UINT8 *row = pBurnDraw + y * nBurnPitch, *src = bg + y * nBurnPitch;
++				UINT8 *sp = (spr && keepsprites) ? spr + y * nBurnPitch : NULL, *cl = clr ? clr + y * nBurnPitch : NULL;
++				// a sprite pixel counts only if a vertical neighbour is a sprite pixel too (drops
++				// stray 1-px lines of off-screen sprites the game never meant to be seen)
++				#define SSF2TWS_SPR(xx) (memcmp(sp + (xx) * bpp, cl + (xx) * bpp, bpp) && \
++					((y > 0 && memcmp(sp - nBurnPitch + (xx) * bpp, cl - nBurnPitch + (xx) * bpp, bpp)) || \
++					 (y + 1 < H && memcmp(sp + nBurnPitch + (xx) * bpp, cl + nBurnPitch + (xx) * bpp, bpp))))
++				for (INT32 x = 0; x < side; x++) {
++					INT32 lx = x, rx = side + 384 + x;
++					// keep the game's own sprite pixels (characters sliding in), else mirrored background
++					if (sp && SSF2TWS_SPR(lx)) memcpy(row + lx * bpp, sp + lx * bpp, bpp);
++					else memcpy(row + lx * bpp, src + (wrap ? (lx + 384) : (2 * side - 1 - x)) * bpp, bpp);
++					if (sp && SSF2TWS_SPR(rx)) memcpy(row + rx * bpp, sp + rx * bpp, bpp);
++					else memcpy(row + rx * bpp, src + (wrap ? (rx - 384) : (side + 384 - 1 - x)) * bpp, bpp);
++				}
++				#undef SSF2TWS_SPR
++			}
++		}
++}
++
++
++// "Next Fighter" screen (one-player mode, between fights): same background as character select.
++static INT32 Ssf2twsIsNextFighter()
++{
++	return CpsRamFF[0x8009 ^ 1] == 2 && CpsRamFF[0x8005 ^ 1] == 4 &&
++	       *(UINT16*)(CpsRamFF + 0x8060) == 0xffc0 && *(UINT16*)(CpsRamFF + 0x8062) == 0x0300 &&
++	       *(UINT16*)(CpsRamFF + 0x8064) == 0xffc0 && *(UINT16*)(CpsRamFF + 0x8066) == 0x06f0;
++}
++
++// VS screen (in a game: 0xFF8009 == 4; in attract mode: 0xFF8009 == 2 with the VS layer setup).
++// The game draws its background full width, so it is left untouched.
++static INT32 Ssf2twsIsVS()
++{
++	if (CpsRamFF[0x8009 ^ 1] == 4) return 1;
++	// continue-screen background still up (continue, game over, high score initials entry)
++	if (CpsRamFF[0x8ece ^ 1] == 0 &&
++	    *(UINT16*)(CpsRamFF + 0x8060) == 0xffc0 && *(UINT16*)(CpsRamFF + 0x8062) == 0x0300 &&
++	    *(UINT16*)(CpsRamFF + 0x8064) == 0x0620 && *(UINT16*)(CpsRamFF + 0x8066) == 0x03e0) return 1;
++	if (Ssf2twsIsNextFighter()) return 0;
++	// defeat / win-quote (0xFF8005 == 8) and continue (== 10) screens: also drawn full width
++	// (the attract intro also passes through 0xFF8005 == 8 / 10, e.g. Akuma's scene, but always with
++	//  0xFF8009 == 2 and the camera off; the defeat screen only starts with 8009 == 2 while the camera is on)
++	// (the attract intro also passes through 0xFF8005 == 8 / 10, e.g. Akuma's scene, but with other
++	//  layer positions; the defeat / continue / initials screens always have scroll2 at (FFC0, 0300))
++	// (scroll2 Y can be off by a few pixels while the screen shakes, e.g. on the initials screen)
++	if ((CpsRamFF[0x8005 ^ 1] == 8 || CpsRamFF[0x8005 ^ 1] == 10) && *(UINT16*)(CpsRamFF + 0x8060) == 0xffc0 &&
++	    *(UINT16*)(CpsRamFF + 0x8062) >= 0x02f0 && *(UINT16*)(CpsRamFF + 0x8062) <= 0x0310) return 1;
++	// game over (screen dims after the continue count reaches 0): the continue screen's layers stay up
++	if (CpsRamFF[0x8005 ^ 1] == 0 && CpsRamFF[0x8009 ^ 1] == 0 && *(UINT16*)(CpsRamFF + 0x805e) == 0x0100 &&
++	    *(UINT16*)(CpsRamFF + 0x8060) == 0xffc0 && *(UINT16*)(CpsRamFF + 0x8062) == 0x0300) return 1;
++	return CpsRamFF[0x8009 ^ 1] == 2 && CpsRamFF[0x8005 ^ 1] == 4 &&
++	       *(UINT16*)(CpsRamFF + 0x8060) == 0xffc0 && *(UINT16*)(CpsRamFF + 0x8062) == 0x0300;
++}
++
++static void Ssf2twsMaskStripsRaw()
++{
++	if (pBurnDraw == NULL || nCpsScreenWidth < 448 + 8) return;
++	if ((CpsRamFF[0x8ece ^ 1] == 1 && CpsRamFF[0x8005 ^ 1] <= 8) || (CpsRamFF[0x8005 ^ 1] == 4 && CpsRamFF[0x8009 ^ 1] >= 6)) return;   // fight: keep full width
++	if (Ssf2twsIsVS()) return;   // VS screen: the game draws its background full width
++
++	const INT32 W = nCpsScreenWidth, H = nCpsScreenHeight, bpp = nBurnBpp;
++	const INT32 side = (W - 384) / 2;                 // 64
++
++	// Cammy / Chun-Li intro scenes: mirror the picture's outer 64 px into each strip
++	// (background layers only: the frame is re-rendered without the portrait layer into a scratch
++	//  buffer, and the strips are mirrored from that, so the characters are never mirrored)
++	if (CpsRamFF[0x02d7 ^ 1] == 240 && CpsRamFF[0x02e7 ^ 1] == 12 && CpsRamFF[0x8005 ^ 1] == 2 && CpsRamFF[0x8009 ^ 1] == 2) {
++		Ssf2twsMirrorStrips(SSF2TWS_BG_LAYERS, 1);
++		return;
++	}
++	// Next Fighter screen: tile the background like character select. The portrait row's band
++	// (rows 160-191) would repeat the portraits, so there the strips take the background pattern
++	// from one pattern period (192 px) further up the same layer, which continues it seamlessly.
++	if (Ssf2twsIsNextFighter()) {
++		Ssf2twsMirrorStrips(SSF2TWS_SEL_LAYERS, 0, 1);
++		static UINT8 *up = NULL; static INT32 upsize = 0;
++		INT32 need = nBurnPitch * H;
++		if (need > upsize) { if (up) BurnFree(up); up = (UINT8*)BurnMalloc(need); upsize = need; }
++		if (up) {
++			UINT8 *save = pBurnDraw; INT32 sl = nBurnLayer;
++			UINT16 *ry = (UINT16*)(CpsSaveReg[0] + 0x16), oy = *ry;   // scroll3 Y
++			*ry = BURN_ENDIAN_SWAP_INT16(BURN_ENDIAN_SWAP_INT16(oy) - 192);
++			pBurnDraw = up; nBurnLayer = SSF2TWS_SEL_LAYERS; CpsDraw();
++			*ry = oy; pBurnDraw = save; nBurnLayer = sl;
++			for (INT32 y = 160; y <= 191 && y < H; y++) {
++				UINT8 *row = pBurnDraw + y * nBurnPitch, *src = up + y * nBurnPitch;
++				memcpy(row, src + 384 * bpp, side * bpp);                       // same 384 px tiling as above
++				memcpy(row + (side + 384) * bpp, src + side * bpp, side * bpp);
++			}
++		}
++		return;
++	}
++	// Character select: identified by the game's default scroll setup outside gameplay
++	if ((CpsRamFF[0x8009 ^ 1] == 0 || CpsRamFF[0x8009 ^ 1] == 6) &&   // select screen (attract, new game, after a continue)
++	    *(UINT16*)(CpsRamFF + 0x8060) == 0xffc0 && *(UINT16*)(CpsRamFF + 0x8062) == 0x0300 &&
++	    *(UINT16*)(CpsRamFF + 0x8064) == 0xffc0 && *(UINT16*)(CpsRamFF + 0x8066) == 0x06f0) {
++		INT32 m = SSF2TWS_SEL_LAYERS;
++		Ssf2twsMirrorStrips(m, 0, 1);   // background is designed to tile every 384 px
++		return;
++	}
++	for (INT32 s = 0; s < 2; s++) {
++		const INT32 sx = s ? (side + 384 - 8) : side;    // 8-px sample just inside the original edge
++		const INT32 fx = s ? (side + 384) : 0;           // first strip column
++		UINT32 colours[224]; UINT8 uni[224]; INT32 nuni = 0;
++		for (INT32 y = 0; y < H && y < 224; y++) {
++			UINT8 *row = pBurnDraw + y * nBurnPitch;
++			UINT32 c0 = 0; memcpy(&c0, row + sx * bpp, bpp);
++			uni[y] = 1;
++			for (INT32 x = 1; x < 8; x++) { UINT32 c = 0; memcpy(&c, row + (sx + x) * bpp, bpp); if (c != c0) { uni[y] = 0; break; } }
++			colours[y] = c0; nuni += uni[y];
++		}
++		UINT32 dom = 0;
++		INT32 solid = nuni * 4 >= H * 3;                 // >= 75% of rows solid -> solid-colour screen
++		if (solid) {                                     // most common solid edge colour
++			INT32 best = 0;
++			for (INT32 y = 0; y < H && y < 224; y++) if (uni[y]) {
++				INT32 n = 0; for (INT32 z = 0; z < H && z < 224; z++) if (uni[z] && colours[z] == colours[y]) n++;
++				if (n > best) { best = n; dom = colours[y]; }
++			}
++		}
++		for (INT32 y = 0; y < H && y < 224; y++) {
++			UINT8 *row = pBurnDraw + y * nBurnPitch;
++			// in-game screens (VS screen etc.): per-row edge colour; attract/title: one colour (no streaks)
++			UINT32 c = solid ? ((CpsRamFF[0x8009 ^ 1] == 2 || !uni[y]) ? dom : colours[y]) : 0;   // attract (8009==2): one colour; elsewhere per-row as before
++			for (INT32 x = 0; x < side; x++) memcpy(row + (fx + x) * bpp, &c, bpp);
++		}
++	}
++}
++
++
++// In fights: pixels in the side strips that no layer covers (backdrop showing through, e.g. the
++// edges of Dee Jay's stage) are filled by mirroring the stage background (layers only, no
++// sprites) across the edge of the gap, row by row.
++static void Ssf2twsFillFightHoles()
++{
++	if (pBurnDraw == NULL || nCpsScreenWidth < 448 + 8) return;
++	const INT32 W = nCpsScreenWidth, H = nCpsScreenHeight, bpp = nBurnBpp, side = (W - 384) / 2;
++	static UINT8 *clr = NULL, *lay = NULL; static INT32 sz = 0;
++	INT32 need = nBurnPitch * H;
++	if (need > sz) { if (clr) BurnFree(clr); if (lay) BurnFree(lay); clr = (UINT8*)BurnMalloc(need); lay = (UINT8*)BurnMalloc(need); sz = need; }
++	if (!clr || !lay) return;
++	UINT8 *save = pBurnDraw; INT32 saveLayer = nBurnLayer;
++	pBurnDraw = clr; nBurnLayer = 0; CpsDraw();                 // backdrop only
++	pBurnDraw = save; nBurnLayer = saveLayer;
++	UINT32 bd = 0; memcpy(&bd, clr, bpp);
++	// any holes in the strips?
++	INT32 holes = 0;
++	for (INT32 y = 0; y < H && !holes; y++) {
++		UINT8 *row = pBurnDraw + y * nBurnPitch;
++		for (INT32 x = 0; x < side && !holes; x++) {
++			UINT32 a = 0, b = 0; memcpy(&a, row + x * bpp, bpp); memcpy(&b, row + (W - 1 - x) * bpp, bpp);
++			if (a == bd || b == bd) holes = 1;
++		}
++	}
++	if (!holes) return;
++	// a hole means the bottom-most layer has no art there: mirror only that layer (mirroring the
++	// layers in front of it as well would duplicate their objects into the gap)
++	INT32 holemask = 0x0e;
++	{
++		UINT16 lc = BURN_ENDIAN_SWAP_INT16(*((UINT16 *)(CpsSaveReg[0] + nCpsLcReg)));
++		for (INT32 i = 0; i < 4; i++) {
++			INT32 l = (lc >> (6 + 2 * i)) & 3;                  // bottom .. top
++			if (l > 0 && (lc & CpsLayEn[l])) { holemask = 1 << l; break; }
++		}
++	}
++	pBurnDraw = lay; nBurnLayer = holemask; CpsDraw();          // bottom background layer only
++	pBurnDraw = save; nBurnLayer = saveLayer;
++	for (INT32 y = 0; y < H; y++) {
++		UINT8 *row = pBurnDraw + y * nBurnPitch, *src = lay + y * nBurnPitch;
++		// mirror the bottom layer across the edge of its own art in this row (a straight edge, so
++		// the mirrored part continues it without steps)
++		INT32 L = W / 2, R = W / 2 - 1;
++		for (; L > 0; L--) { UINT32 v = 0; memcpy(&v, src + (L - 1) * bpp, bpp); if (v == bd) break; }
++		for (; R < W - 1; R++) { UINT32 v = 0; memcpy(&v, src + (R + 1) * bpp, bpp); if (v == bd) break; }
++		if (R < L) continue;
++		for (INT32 k = 0; k < 2 * side; k++) {
++			INT32 x = k < side ? k : W - 2 * side + k;
++			UINT32 c = 0; memcpy(&c, row + x * bpp, bpp);
++			if (c != bd) continue;
++			INT32 sx = (x < L) ? 2 * L - 1 - x : (x > R) ? 2 * R + 1 - x : -1;
++			if (sx < L || sx > R) continue;
++			UINT32 v = 0; memcpy(&v, src + sx * bpp, bpp);
++			if (v != bd) memcpy(row + x * bpp, &v, bpp);
++		}
++	}
++	for (INT32 pass = 0; pass < 2; pass++) {
++		for (INT32 y = 0; y < H; y++) {
++			INT32 yy = pass ? (H - 1 - y) : y, ny = pass ? yy + 1 : yy - 1;
++			if (ny < 0 || ny >= H) continue;
++			UINT8 *row = pBurnDraw + yy * nBurnPitch, *nb = pBurnDraw + ny * nBurnPitch;
++			for (INT32 k = 0; k < 2 * side; k++) {
++				INT32 x = k < side ? k : W - 2 * side + k;
++				UINT32 c = 0, d = 0; memcpy(&c, row + x * bpp, bpp); memcpy(&d, nb + x * bpp, bpp);
++				if (c == bd && d != bd) memcpy(row + x * bpp, &d, bpp);
++			}
++		}
++	}
++}
++
++// Super Combo finish: the burst (scroll2/scroll3) is drawn only in the middle 384 px. Re-compose
++// the frame: the burst layers' middle 384 px stretched horizontally to the full width, with the
++// sprites (fighters, "SUPER COMBO FINISH" text) and scroll1 (HUD) drawn unscaled on top.
++static void Ssf2twsStretchFinish()
++{
++	if (pBurnDraw == NULL || nCpsScreenWidth < 448 + 8) return;
++	const INT32 W = nCpsScreenWidth, H = nCpsScreenHeight, bpp = nBurnBpp, side = (W - 384) / 2;
++	static UINT8 *bg = NULL, *fg = NULL, *clr = NULL; static INT32 sz = 0;
++	INT32 need = nBurnPitch * H;
++	if (need > sz) {
++		if (bg) BurnFree(bg); if (fg) BurnFree(fg); if (clr) BurnFree(clr);
++		bg = (UINT8*)BurnMalloc(need); fg = (UINT8*)BurnMalloc(need); clr = (UINT8*)BurnMalloc(need); sz = need;
++	}
++	if (!bg || !fg || !clr) return;
++	UINT8 *save = pBurnDraw; INT32 saveLayer = nBurnLayer;
++	// Foreground = whatever the hardware draws above the burst layers (scroll2/3): sprites whose
++	// priority level is above theirs (same rules as Cps2Layers), and scroll1 only if it is on top.
++	UINT16 lc = BURN_ENDIAN_SWAP_INT16(*((UINT16 *)(CpsSaveReg[0] + nCpsLcReg)));
++	INT32 lp = (CpsSaveFrg[0][4] << 8) | CpsSaveFrg[0][5];
++	INT32 draw[4] = { (lc >> 6) & 3, (lc >> 8) & 3, (lc >> 10) & 3, (lc >> 12) & 3 };   // bottom .. top
++	INT32 prio[4] = { 0, (lp >> 4) & 7, (lp >> 8) & 7, (lp >> 12) & 7 };
++	for (INT32 i = 3, hi = 9999; i >= 0; i--) if (draw[i] > 0) { if (prio[draw[i]] > hi) prio[draw[i]] = hi; else hi = prio[draw[i]]; }
++	INT32 pmax = 0, top = -1, s1pos = -1;
++	for (INT32 i = 0; i < 4; i++) {
++		if (draw[i] == 2 || draw[i] == 3) { if (prio[draw[i]] > pmax) pmax = prio[draw[i]]; top = i; }
++		if (draw[i] == 1) s1pos = i;
++	}
++	INT32 fgmask = 0x01 | ((s1pos > top && (lc & CpsLayEn[1])) ? 0x02 : 0);
++	UINT32 saveSpr = nSpriteEnable;
++	pBurnDraw = bg;  nBurnLayer = 0x0c; nSpriteEnable = 0; CpsDraw();                        // burst layers
++	pBurnDraw = fg;  nBurnLayer = fgmask; nSpriteEnable = saveSpr & (0xff << (pmax + 1)); CpsDraw();   // foreground
++	pBurnDraw = clr; nBurnLayer = 0x00; nSpriteEnable = 0; CpsDraw();                        // backdrop only
++	pBurnDraw = save; nBurnLayer = saveLayer; nSpriteEnable = saveSpr;
++	for (INT32 y = 0; y < H; y++) {
++		UINT8 *row = pBurnDraw + y * nBurnPitch, *b = bg + y * nBurnPitch, *f = fg + y * nBurnPitch, *c = clr + y * nBurnPitch;
++		for (INT32 x = 0; x < W; x++) {
++			INT32 isfg = memcmp(f + x * bpp, c + x * bpp, bpp) != 0;
++			if (isfg && (x < side || x >= side + 384)) {      // strips: drop stray 1-px lines of off-screen sprites
++				isfg = (y > 0 && memcmp(f - nBurnPitch + x * bpp, c - nBurnPitch + x * bpp, bpp)) ||
++				       (y + 1 < H && memcmp(f + nBurnPitch + x * bpp, c + nBurnPitch + x * bpp, bpp));
++			}
++			if (isfg) { memcpy(row + x * bpp, f + x * bpp, bpp); continue; }
++			// source position in the middle 384 px, in quarter pixels: 4*side + 3*x (scale 384/512)
++			INT32 q = 4 * side + 3 * x + 1, sx = q >> 2, fr = q & 3;   // +1: sample pixel centres
++			if (sx >= side + 383) { sx = side + 383; fr = 0; }
++			if (bpp == 4 && fr) {
++				UINT32 p0 = ((UINT32*)b)[sx], p1 = ((UINT32*)b)[sx + 1];
++				UINT32 rb = ((p0 & 0xff00ff) * (4 - fr) + (p1 & 0xff00ff) * fr) >> 2 & 0xff00ff;
++				UINT32 g  = ((p0 & 0x00ff00) * (4 - fr) + (p1 & 0x00ff00) * fr) >> 2 & 0x00ff00;
++				((UINT32*)row)[x] = rb | g;
++			} else {
++				memcpy(row + x * bpp, b + (sx + (fr >= 2)) * bpp, bpp);
++			}
++		}
++	}
++}
++
++// Fei Long's stage: the near rock / waterfall layer (scroll1) ends before the right edge of the
++// 16:9 view near the camera's right limit. Mirror that layer across its own right edge, row by
++// row, wherever nothing in front of it (scroll2, sprites) covers the pixel.
++static void Ssf2twsFeiLongFill()
++{
++	if (pBurnDraw == NULL || nCpsScreenWidth < 448 + 8) return;
++	const INT32 W = nCpsScreenWidth, H = nCpsScreenHeight, bpp = nBurnBpp;
++	static UINT8 *l1 = NULL, *fr = NULL, *clr = NULL; static INT32 sz = 0;
++	INT32 need = nBurnPitch * H;
++	if (need > sz) {
++		if (l1) BurnFree(l1); if (fr) BurnFree(fr); if (clr) BurnFree(clr);
++		l1 = (UINT8*)BurnMalloc(need); fr = (UINT8*)BurnMalloc(need); clr = (UINT8*)BurnMalloc(need); sz = need;
++	}
++	if (!l1 || !fr || !clr) return;
++	UINT8 *save = pBurnDraw; INT32 sl = nBurnLayer;
++	pBurnDraw = clr; nBurnLayer = 0x00; CpsDraw();     // backdrop only
++	pBurnDraw = l1;  nBurnLayer = 0x02; CpsDraw();     // scroll1 only
++	pBurnDraw = fr;  nBurnLayer = 0x05; CpsDraw();     // sprites + scroll2 (in front)
++	pBurnDraw = save; nBurnLayer = sl;
++	for (INT32 y = 0; y < H; y++) {
++		UINT8 *a = l1 + y * nBurnPitch, *c = clr + y * nBurnPitch, *f = fr + y * nBurnPitch, *row = pBurnDraw + y * nBurnPitch;
++		INT32 R = -1;
++		for (INT32 x = W - 1; x >= W / 2; x--) if (memcmp(a + x * bpp, c + x * bpp, bpp)) { R = x; break; }
++		if (R < W - 128 || R >= W - 1) continue;          // edge must be near the right side
++		for (INT32 x = R + 1; x < W; x++) {
++			INT32 sx = 2 * R + 1 - x; if (sx < 0) break;
++			if (memcmp(f + x * bpp, c + x * bpp, bpp)) continue;      // something in front: keep it
++			if (!memcmp(a + sx * bpp, c + sx * bpp, bpp)) continue;   // nothing to mirror
++			memcpy(row + x * bpp, a + sx * bpp, bpp);
++		}
++	}
++}
++
++// Debounce: the side strips may only switch from showing a picture (mirrored/tiled background)
++// to a flat colour, or to plain black, once the new state has held for 3 frames. Until then the
++// previous strips are kept, so one- or two-frame scene wipes don't flash bars on the sides.
++static void Ssf2twsMaskStrips()
++{
++	static UINT8 *keep = NULL; static INT32 keepsize = 0;
++	static INT32 shown = -1;       // 0 picture, 1 flat colour, 2 black, -1 none (fight / VS / not ready)
++	static INT32 pend = -1, pendn = 0;
++	if (pBurnDraw == NULL || nCpsScreenWidth < 448 + 8) return;
++	const INT32 H = nCpsScreenHeight, bpp = nBurnBpp, side = (nCpsScreenWidth - 384) / 2;
++	// fight (camera active), or a fight phase where the game drops the camera (e.g. Super Combo finish)
++	// Super Combo finish: the game drops the camera (0xFF8ECE = 0) and draws its burst only in the
++	// middle 384 px; stretch the burst to the full width, fighters and HUD unscaled
++	if (CpsRamFF[0x8ece ^ 1] == 0 && CpsRamFF[0x8005 ^ 1] == 4 && CpsRamFF[0x8009 ^ 1] == 10) {
++		shown = -1; pend = -1; pendn = 0; Ssf2twsStretchFinish(); return;
++	}
++	if ((CpsRamFF[0x8ece ^ 1] == 1 && CpsRamFF[0x8005 ^ 1] <= 8) || (CpsRamFF[0x8005 ^ 1] == 4 && CpsRamFF[0x8009 ^ 1] >= 6)) { shown = -1; pend = -1; pendn = 0; Ssf2twsFillFightHoles(); if (CpsRamFF[0x8c4f ^ 1] == 14) Ssf2twsFeiLongFill(); return; }
++	if (Ssf2twsIsVS()) { shown = -1; pend = -1; pendn = 0; return; }
++	Ssf2twsMaskStripsRaw();
++
++	// classify the new strips
++	INT32 st = 1; UINT32 c0 = 0; memcpy(&c0, pBurnDraw, bpp);
++	for (INT32 y = 0; y < H && st != 0; y++) {
++		UINT8 *row = pBurnDraw + y * nBurnPitch;
++		for (INT32 x = 0; x < side; x++) {
++			UINT32 a = 0, b = 0; memcpy(&a, row + x * bpp, bpp); memcpy(&b, row + (side + 384 + x) * bpp, bpp);
++			if (a != c0 || b != c0) { st = 0; break; }
++		}
++	}
++	if (st == 1 && c0 == 0) st = 2;
++
++	INT32 need = 2 * side * bpp * H;
++	if (need > keepsize) { if (keep) BurnFree(keep); keep = (UINT8*)BurnMalloc(need); keepsize = need; shown = -1; }
++	if (!keep) return;
++
++	INT32 hold = 0;
++	if (shown != -1 && st != shown && (shown == 0 || st == 2)) {
++		if (pend == st) pendn++; else { pend = st; pendn = 1; }
++		if (pendn < 3) hold = 1;
++	}
++	if (hold) {          // restore the previously shown strips
++		for (INT32 y = 0; y < H; y++) {
++			UINT8 *row = pBurnDraw + y * nBurnPitch, *k = keep + y * 2 * side * bpp;
++			memcpy(row, k, side * bpp); memcpy(row + (side + 384) * bpp, k + side * bpp, side * bpp);
++		}
++		return;
++	}
++	pend = -1; pendn = 0; shown = st;
++	for (INT32 y = 0; y < H; y++) {
++		UINT8 *row = pBurnDraw + y * nBurnPitch, *k = keep + y * 2 * side * bpp;
++		memcpy(k, row, side * bpp); memcpy(k + side * bpp, row + (side + 384) * bpp, side * bpp);
++	}
++}
++
++// Force the game's "Demo Sound" option on (attract mode with music and effects) by setting
++// the RAM copy of the option that the game checks at run time (0xFF82DD). The EEPROM is left
++// untouched, so the service menu still shows the stored value.
++static void Ssf2twsDemoSound()
++{
++	if (CpsRamFF[0x82dd ^ 1] == 0) CpsRamFF[0x82dd ^ 1] = 1;
++}
++
++static INT32 Ssf2twsFrame()
++{
++	Ssf2twsDemoSound();
++	INT32 nRet = Cps2Frame();
++	Ssf2twsMaskStrips();
++	return nRet;
++}
++
++static INT32 Ssf2twsRedraw()
++{
++	INT32 nRet = CpsRedraw();
++	Ssf2twsMaskStrips();
++	return nRet;
++}
++
++
++// ---- Wide scroll1 (game layer 1) ----
++// Layer 1 uses the 8x8 scroll layer, whose tile map is only 512 px wide: exactly the width of the
++// 16:9 view, so the game cannot keep columns ready beyond the edges and they appear late (or
++// wrapped from the other side). In fights the game builds that layer from stage data in ROM
++// (256 px blocks -> 32 px chunks -> 4x4 tiles, see 0xCD550 / 0xCD634), so the side columns are
++// computed straight from that data into a 1024 px wide map. The columns of the original 384 px
++// window always come from the game's own tile map, and the result is only used while those
++// columns agree with the computed ones (self-check), so it can never show something the game
++// would not have drawn.
++static UINT8 s1wide[128 * 256];
++static INT32 s1on = 0;
++
++static inline UINT16 s1rd16(UINT32 a)
++{
++	a &= 0xfffffe;
++	if (a < nCpsRomLen) return *(UINT16*)(CpsRom + a);
++	if (a >= 0xff0000) return *(UINT16*)(CpsRamFF + (a & 0xfffe));
++	return 0;
++}
++static inline UINT32 s1rd32(UINT32 a) { return ((UINT32)s1rd16(a) << 16) | s1rd16(a + 2); }
++
++// tile map column for stage column w (8 px units, any integer): 64 tiles of (code, attr) words,
++// stored like the hardware map: rows 0-31 then rows 32-63
++static void s1column(INT32 w, UINT8 *out)
++{
++	UINT32 table = s1rd32(0xff8e60);                 // layer 1 object +0x12: block table
++	INT32 wx = w * 8;
++	for (INT32 tr = 0; tr < 64; tr++) {
++		INT32 d6 = tr * 8;
++		UINT32 blk = s1rd16(table + ((d6 & 0x100) >> 5) + ((wx & 0x300) >> 7));
++		UINT32 chunk = s1rd16(0x30e000 + (blk << 7) + ((d6 & 0xe0) >> 4) + ((wx & 0xe0) >> 1));
++		UINT32 t = 0x300000 + (chunk << 6) + ((wx >> 3) & 3) * 16 + (tr & 3) * 4;
++		UINT16 *o = (UINT16*)(out + ((tr & 0x20) << 2) + ((tr & 0x1f) << 2));
++		o[0] = s1rd16(t); o[1] = s1rd16(t + 2);
++	}
++}
++static inline void s1getvram(const UINT8 *base, INT32 c, UINT8 *out)
++{
++	memcpy(out, base + ((c & 63) << 7), 128); memcpy(out + 128, base + 0x2000 + ((c & 63) << 7), 128);
++}
++static inline INT32 s1floordiv(INT32 a, INT32 b) { return (a >= 0) ? a / b : -((-a + b - 1) / b); }
++
++static UINT8 *Ssf2twsScr1(UINT8 *base, INT32 nScrX)
++{
++	CpsScr1Wide = NULL;
++	if (CpsRamFF[0x8ece ^ 1] != 1 || CpsRamFF[0x8005 ^ 1] > 8) return base;      // fights only
++	const INT32 ix = (nScrX >> 3) + 1, ntile = nCpsScreenWidth >> 3, side = (nCpsScreenWidth - 384) >> 4;   // side in tiles (8)
++	// stage column of tile map column fx is fx + 64*k for one k: find it on the middle columns
++	UINT8 v[256], c[256];
++	INT32 bestk = 0, best = -1, total = 0;
++	for (INT32 k = -8; k <= 8; k++) {
++		INT32 ok = 0; total = 0;
++		for (INT32 x = side + 2; x < ntile - side - 2; x += 3) {
++			INT32 fx = ix + x;
++			s1getvram(base, fx, v); s1column(fx + 64 * k, c);
++			for (INT32 i = 0; i < 64; i++) { total++; ok += !memcmp(v + i * 4, c + i * 4, 4); }
++		}
++		if (ok > best) { best = ok; bestk = k; }
++	}
++	if (best * 100 < total * 97) { s1on = 0; return base; }   // data doesn't match: leave the game's map alone
++	s1on = 1;
++	for (INT32 x = -1; x < ntile; x++) {
++		INT32 fx = ix + x;
++		UINT8 *col = s1wide + ((fx & 127) << 8);
++		if (x >= side && x < ntile - side) s1getvram(base, fx, col);   // original window: the game's map
++		else s1column(fx + 64 * bestk, col);                            // sides: from the stage data
++	}
++	CpsScr1Wide = s1wide;
++	return base;
++}
++
++static INT32 DrvExit();
++static INT32 Ssf2twsExit()
++{
++	CpsScr1Hook = NULL; CpsScr1Wide = NULL;
++	return DrvExit();
++}
++
++static INT32 Ssf2twsInit()
++{
++	INT32 nRet = Ssf2tInit();
++	if (nRet == 0) { Ssf2twsApplyPatches(); CpsScr1Hook = Ssf2twsScr1; CpsScr1Wide = NULL; }
++	return nRet;
++}
++
+ static INT32 XmcotaInit()
+ {
+ 	Xmcota = 1;
+@@ -12413,6 +12920,16 @@ struct BurnDriver BurnDrvCpsSsf2t = {
+ 	&CpsRecalcPal, 0x1000, 384, 224, 4, 3
+ };
+ 
++struct BurnDriver BurnDrvCpsSsf2tws = {
++	"ssf2tws", "ssf2t", NULL, NULL, "1994",
++	"Super Street Fighter II Turbo (World 940223, 16:9 widescreen hack)\0", NULL, "Capcom", "CPS2",
++	NULL, NULL, NULL, NULL,
++	BDF_GAME_WORKING | BDF_CLONE | BDF_HACK | BDF_HISCORE_SUPPORTED, 2, HARDWARE_CAPCOM_CPS2, GBF_VSFIGHT, FBF_SF,
++	NULL, Ssf2tRomInfo, Ssf2tRomName, NULL, NULL, NULL, NULL, Cps2FightingInputInfo, NULL,
++	Ssf2twsInit, Ssf2twsExit, Ssf2twsFrame, Ssf2twsRedraw, CpsAreaScan,
++	&CpsRecalcPal, 0x1000, 512, 224, 16, 9
++};
++
+ struct BurnDriver BurnDrvCpsSsf2th = {
+ 	"ssf2th", "ssf2t", NULL, NULL, "1994",
+ 	"Super Street Fighter II Turbo (Hispanic 940223)\0", NULL, "Capcom", "CPS2",
+diff --git a/src/burner/libretro/libretro.cpp b/src/burner/libretro/libretro.cpp
+index 9e89835..76b96a6 100644
+--- a/src/burner/libretro/libretro.cpp
++++ b/src/burner/libretro/libretro.cpp
+@@ -2638,6 +2638,13 @@ bool retro_load_game_special(unsigned game_type, const struct retro_game_info *i
+ 	return retro_load_game_common();
+ }
+ 
++// ssf2tws widescreen hack: lets a frontend that can be killed without warning (iOS) write the
++// game's EEPROM (settings, high scores) without unloading the game
++extern "C" void ssf2tws_save_nvram(void)
++{
++	if (nBurnDrvActive != ~0U) BurnNvramSave(g_autofs_path);
++}
++
+ void retro_unload_game(void)
+ {
+ 	if (nBurnDrvActive != ~0U)
