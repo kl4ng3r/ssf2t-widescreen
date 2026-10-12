@@ -26,10 +26,11 @@ jobs:
           make SUBSET=cps12 generate-files
           CCI="$(xcrun -sdk iphoneos -f clang) -isysroot $(xcrun -sdk iphoneos --show-sdk-path) -arch arm64 -mcpu=apple-a12 -miphoneos-version-min=17.0"
           CXXI="$(xcrun -sdk iphoneos -f clang++) -isysroot $(xcrun -sdk iphoneos --show-sdk-path) -arch arm64 -mcpu=apple-a12 -miphoneos-version-min=17.0"
-          make -j"$(sysctl -n hw.ncpu)" SUBSET=cps12 platform=ios-arm64 STATIC_LINKING=1 \
+          make -j"$(sysctl -n hw.ncpu)" SUBSET=cps12 platform=ios-arm64 \
                CC="$CCI" CXX="$CXXI" AR="$(xcrun -sdk iphoneos -f ar)"
           mkdir -p "$GITHUB_WORKSPACE/ios/lib"
-          cp fbneo_cps12_libretro_ios.dylib "$GITHUB_WORKSPACE/ios/lib/libfbneo.a"
+          # static library from all objects (incl. libretro-common, which STATIC_LINKING=1 leaves out)
+          find ../.. -name '*.o' -print0 | xargs -0 "$(xcrun -sdk iphoneos -f ar)" rcs "$GITHUB_WORKSPACE/ios/lib/libfbneo.a"
           file "$GITHUB_WORKSPACE/ios/lib/libfbneo.a"
 
       - name: Generate the Xcode project and build the app
