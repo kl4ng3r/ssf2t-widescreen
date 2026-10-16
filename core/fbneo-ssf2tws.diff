@@ -69,10 +69,10 @@ index 306bb91..dc291ff 100644
  			t = BURN_ENDIAN_SWAP_INT16(pst[0]);
  			t <<= 6;										// Get real tile address
 diff --git a/src/burn/drv/capcom/d_cps2.cpp b/src/burn/drv/capcom/d_cps2.cpp
-index 099ded2..21b6f60 100644
+index 099ded2..a9fe4e8 100644
 --- a/src/burn/drv/capcom/d_cps2.cpp
 +++ b/src/burn/drv/capcom/d_cps2.cpp
-@@ -9918,6 +9918,705 @@ static INT32 Ssf2tInit()
+@@ -9918,6 +9918,722 @@ static INT32 Ssf2tInit()
  	return nRet;
  }
  
@@ -461,7 +461,8 @@ index 099ded2..21b6f60 100644
 +			}
 +			rows += ok;
 +		}
-+		if (rows * 10 < H * 4) return;
++		const INT32 pct = (CpsRamFF[0x8009 ^ 1] == 10) ? 40 : 30;	// round intro/outro: the HUD portraits break the black rows
++		if (rows * 100 < H * pct) return;
 +		if (rows * 10 >= H * 6) {                       // mostly blank: the whole strips go black
 +			for (INT32 y = 0; y < H; y++) {
 +				UINT8 *row = pBurnDraw + y * nBurnPitch;
@@ -470,28 +471,37 @@ index 099ded2..21b6f60 100644
 +			return;
 +		}
 +	}
++	static UINT8 blk[1024];
 +	for (INT32 s = 0; s < 2; s++) {
 +		const INT32 ex = s ? side + 376 : side, fx = s ? side + 384 : 0;
++		for (INT32 y = 0; y < H && y < 1024; y++) {
++			UINT8 *row = pBurnDraw + y * nBurnPitch;
++			UINT32 c0 = 0; memcpy(&c0, row + ex * bpp, bpp);
++			UINT32 r = (c0 >> 16) & 0xff, g = (c0 >> 8) & 0xff, b = c0 & 0xff;
++			if (bpp == 2) { r = (c0 >> 11) << 3; g = ((c0 >> 5) & 63) << 2; b = (c0 & 31) << 3; }
++			INT32 cur = (r + g + b) < 24;
++			for (INT32 k = 1; k < 8 && cur; k++) { UINT32 v = 0; memcpy(&v, row + (ex + k) * bpp, bpp); if (v != c0) cur = 0; }
++			blk[y] = cur;
++		}
++		// runs shorter than 4 rows don't count; gaps of up to 40 rows between black runs (the HUD
++		// portraits and life bars drawn over the blank-out) are blanked too
 +		INT32 run = 0;
 +		for (INT32 y = 0; y <= H; y++) {
-+			INT32 cur = 0;
-+			if (y < H) {
-+				UINT8 *row = pBurnDraw + y * nBurnPitch;
-+				UINT32 c0 = 0; memcpy(&c0, row + ex * bpp, bpp);
-+				UINT32 r = (c0 >> 16) & 0xff, g = (c0 >> 8) & 0xff, b = c0 & 0xff;
-+				if (bpp == 2) { r = (c0 >> 11) << 3; g = ((c0 >> 5) & 63) << 2; b = (c0 & 31) << 3; }
-+				cur = (r + g + b) < 24;
-+				for (INT32 k = 1; k < 8 && cur; k++) { UINT32 v = 0; memcpy(&v, row + (ex + k) * bpp, bpp); if (v != c0) cur = 0; }
-+			}
-+			if (cur) { run++; continue; }
-+			if (run >= 4) {
-+				for (INT32 yy = y - run; yy < y; yy++) {
-+					UINT8 *row = pBurnDraw + yy * nBurnPitch;
-+					UINT32 c0 = 0; memcpy(&c0, row + ex * bpp, bpp);
-+					for (INT32 x = 0; x < side; x++) memcpy(row + (fx + x) * bpp, &c0, bpp);
-+				}
-+			}
++			if (y < H && blk[y]) { run++; continue; }
++			if (run > 0 && run < 4) for (INT32 yy = y - run; yy < y; yy++) blk[yy] = 0;
 +			run = 0;
++		}
++		INT32 last = -1;
++		for (INT32 y = 0; y < H; y++) {
++			if (!blk[y]) continue;
++			if (last >= 0 && y - last > 1 && y - last <= 41) for (INT32 yy = last + 1; yy < y; yy++) blk[yy] = 2;
++			last = y;
++		}
++		for (INT32 y = 0; y < H; y++) {
++			if (!blk[y]) continue;
++			UINT8 *row = pBurnDraw + y * nBurnPitch;
++			UINT32 c0 = 0; if (blk[y] == 1) memcpy(&c0, row + ex * bpp, bpp);
++			for (INT32 x = 0; x < side; x++) memcpy(row + (fx + x) * bpp, &c0, bpp);
 +		}
 +	}
 +}
@@ -586,6 +596,7 @@ index 099ded2..21b6f60 100644
 +	return 0;
 +}
 +
++static INT32 wsLastOff = 0;
 +static void Ssf2twsGlitchFilter()
 +{
 +	if (pBurnDraw == NULL) return;
@@ -597,12 +608,18 @@ index 099ded2..21b6f60 100644
 +	if (!wsPrevIn || !wsPrevOut) return;
 +	INT32 hold = 0;
 +	const INT32 fight = CpsRamFF[0x8ece ^ 1] == 1 && CpsRamFF[0x8005 ^ 1] <= 8;
++	if (!fight) wsLastOff = 0;
 +	if (wsValid) {
 +		if (fight) {
 +			INT32 hw = BURN_ENDIAN_SWAP_INT16(*(UINT16*)(CpsSaveReg[0] + 0x10));
 +			INT32 want = (*(UINT16*)(CpsRamFF + 0x8ed4) - 0x100) & 0xffff;
-+			INT32 dd = (hw - want) & 0xffff; if (dd > 0x8000) dd = 0x10000 - dd;
-+			if (dd > 24 && wsHeldRun < 3) hold = 1;
++			INT32 off = (hw - want) & 0xffff;
++			INT32 dd = off; if (dd > 0x8000) dd = 0x10000 - dd;
++			// scroll2 lagging behind the camera (round start). Some stages (Cammy) scroll that layer
++			// with parallax, so only a sudden jump from the last shown frame's offset counts.
++			INT32 dj = (off - wsLastOff) & 0xffff; if (dj > 0x8000) dj = 0x10000 - dj;
++			if (dd > 24 && dj > 24 && wsHeldRun < 3) hold = 1;
++			if (!hold) wsLastOff = off;
 +		} else if (!wsHeld) {
 +			// mean colour difference to the previous frame (4x4 grid) and how flat the new frame is
 +			INT64 sum = 0; INT32 n = 0, same = 0; INT32 r0, g0, b0;
@@ -778,7 +795,7 @@ index 099ded2..21b6f60 100644
  static INT32 XmcotaInit()
  {
  	Xmcota = 1;
-@@ -12413,6 +13112,16 @@ struct BurnDriver BurnDrvCpsSsf2t = {
+@@ -12413,6 +13129,16 @@ struct BurnDriver BurnDrvCpsSsf2t = {
  	&CpsRecalcPal, 0x1000, 384, 224, 4, 3
  };
  
