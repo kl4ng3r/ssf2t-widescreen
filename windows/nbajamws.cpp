@@ -14,6 +14,7 @@
 #include <atomic>
 #include "libretro.h"
 #include "font.h"
+#include "romcheck.h"
 
 #ifdef _WIN32
 #include <direct.h>
@@ -691,7 +692,8 @@ static uint16_t key_bits(int player)
 }
 
 // ------------------------------------------------------------------ states, actions
-static std::string state_path() { return g_saveDir + "/nbajamrw.state"; }
+static std::string g_romName = "nbajamrw";          // core driver / zip name (nbajamrwb = BLEEP version)
+static std::string state_path() { return g_saveDir + "/" + g_romName + ".state"; }
 static void save_state()
 {
 	if (!g_loaded) return;
@@ -736,11 +738,23 @@ static void menu_activate(int i)
 }
 
 // ------------------------------------------------------------------ game loading
-static std::string rom_path() { return g_base + "nbajamrw.zip"; }
+// nbajamrw.zip = Rewind 1.1, nbajamrwb.zip = Rewind 1.1 with "Get that BLEEP outta here" (two core drivers)
+static std::string rom_path_for(int v) { return g_base + (v == ROMSET_REWIND_BLEEP ? "nbajamrwb.zip" : "nbajamrw.zip"); }
+static std::string rom_path() { return file_exists(rom_path_for(ROMSET_REWIND_BLEEP)) ? rom_path_for(ROMSET_REWIND_BLEEP) : rom_path_for(ROMSET_REWIND); }
 static std::string g_loadError;
+static std::string rom_problem(int v)
+{
+	if (v == ROMSET_UNPATCHED) return "This is the original romset: apply the NBA Jam Rewind 1.1 patches to it first.";
+	return "This zip is not NBA Jam TE rev 2.1 with the NBA Jam Rewind 1.1 patches.";
+}
 static bool start_game()
 {
-	if (!file_exists(rom_path())) return false;
+	std::string p = rom_path();
+	if (!file_exists(p)) return false;
+	int v = romset_variant(p.c_str());
+	if (v != ROMSET_REWIND && v != ROMSET_REWIND_BLEEP) { g_loadError = rom_problem(v); return false; }
+	if (p != rom_path_for(v)) { remove(rom_path_for(v).c_str()); rename(p.c_str(), rom_path_for(v).c_str()); }   // name must match the driver
+	g_romName = v == ROMSET_REWIND_BLEEP ? "nbajamrwb" : "nbajamrw";
 	static bool inited = false;
 	retro_set_environment(core_env);
 	retro_set_video_refresh(core_video);
@@ -749,12 +763,9 @@ static bool start_game()
 	retro_set_input_poll(core_poll);
 	retro_set_input_state(core_input);
 	if (!inited) { retro_init(); inited = true; }
-	static std::string path; path = rom_path();
+	static std::string path; path = rom_path_for(v);
 	struct retro_game_info gi = { path.c_str(), NULL, 0, NULL };
-	if (!retro_load_game(&gi)) {
-		g_loadError = "This zip is not NBA Jam TE rev 2.1 with the Rewind 1.1 patches.";
-		return false;
-	}
+	if (!retro_load_game(&gi)) { g_loadError = rom_problem(ROMSET_UNKNOWN); return false; }
 	for (unsigned i = 0; i < PORTS; i++) retro_set_controller_port_device(i, RETRO_DEVICE_JOYPAD);
 	struct retro_system_av_info av; retro_get_system_av_info(&av);
 	if (av.timing.fps > 0) g_fps = av.timing.fps;
@@ -766,11 +777,13 @@ static bool start_game()
 static void install_rom(const char *path)
 {
 	if (g_loaded) { toast("Restart the program to use another zip"); return; }
-	std::string tmp = rom_path() + ".new";
+	std::string tmp = g_base + "import.zip.tmp";
 	if (!copy_file(path, tmp)) { g_loadError = "Could not copy the file."; return; }
-	remove(rom_path().c_str());
-	rename(tmp.c_str(), rom_path().c_str());
-	if (!start_game()) remove(rom_path().c_str());
+	int v = romset_variant(tmp.c_str());
+	if (v != ROMSET_REWIND && v != ROMSET_REWIND_BLEEP) { remove(tmp.c_str()); g_loadError = rom_problem(v); return; }
+	remove(rom_path_for(ROMSET_REWIND).c_str()); remove(rom_path_for(ROMSET_REWIND_BLEEP).c_str());
+	rename(tmp.c_str(), rom_path_for(v).c_str());
+	start_game();
 }
 
 // ------------------------------------------------------------------ main
@@ -934,8 +947,9 @@ int main(int argc, char **argv)
 		if (!g_loaded) {
 			std::vector<std::string> lines = { "NBA Jam TE Rewind - Widescreen", "",
 				"Drag and drop your NBA Jam TE rev 2.1 romset (nbajamte2.zip)",
-				"with the NBA Jam Rewind 1.1 patches applied onto this window,",
-				"or copy it next to the program as nbajamrw.zip." };
+				"with the NBA Jam Rewind 1.1 patches applied (with or without the BLEEP",
+				"extra) onto this window, or copy it next to the program as nbajamrw.zip."
+ };
 			if (!g_loadError.empty()) { lines.push_back(""); lines.push_back(g_loadError); }
 			draw_lines(lines);
 		} else {

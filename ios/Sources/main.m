@@ -10,6 +10,7 @@
 #import <QuartzCore/CAMetalLayer.h>
 #include <stdatomic.h>
 #include "libretro.h"
+#include "romcheck.h"
 
 extern void nbajamrw_save_nvram(void);
 
@@ -136,7 +137,31 @@ static OSStatus audio_render(void *ref, AudioUnitRenderActionFlags *flags, const
 }
 
 - (NSString *)docs { return NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject; }
-- (NSString *)romPath { return [self.docs stringByAppendingPathComponent:@"nbajamrw.zip"]; }
+// nbajamrw.zip = Rewind 1.1, nbajamrwb.zip = Rewind 1.1 with "Get that BLEEP outta here" (two core drivers)
+- (NSString *)romPathFor:(int)variant { return [self.docs stringByAppendingPathComponent:variant == ROMSET_REWIND_BLEEP ? @"nbajamrwb.zip" : @"nbajamrw.zip"]; }
+- (NSString *)romPath
+{
+	NSString *b = [self romPathFor:ROMSET_REWIND_BLEEP];
+	return [NSFileManager.defaultManager fileExistsAtPath:b] ? b : [self romPathFor:ROMSET_REWIND];
+}
+- (NSString *)romProblem:(int)v
+{
+	if (v == ROMSET_UNPATCHED) return @"This is the original NBA Jam TE rev 2.1 romset. Apply the NBA Jam Rewind 1.1 patches to it first, then import it again.";
+	return @"This zip is not NBA Jam TE rev 2.1 (nbajamte2.zip) with the NBA Jam Rewind 1.1 patches applied.";
+}
+// gives the zip in Documents the name of the driver that matches its contents
+- (BOOL)prepareRom
+{
+	NSString *p = self.romPath;
+	int v = romset_variant(p.fileSystemRepresentation);
+	if (v != ROMSET_REWIND && v != ROMSET_REWIND_BLEEP) { [self alert:@"Could not start the game" message:[self romProblem:v]]; return NO; }
+	NSString *want = [self romPathFor:v];
+	if (![want isEqualToString:p]) {
+		[NSFileManager.defaultManager removeItemAtPath:want error:nil];
+		[NSFileManager.defaultManager moveItemAtPath:p toPath:want error:nil];
+	}
+	return YES;
+}
 
 - (void)viewDidLoad
 {
@@ -243,6 +268,7 @@ static OSStatus audio_render(void *ref, AudioUnitRenderActionFlags *flags, const
 - (void)tryStart
 {
 	if (![NSFileManager.defaultManager fileExistsAtPath:self.romPath]) { [self showHelp]; return; }
+	if (![self prepareRom]) { [self showHelp]; return; }
 	[_help removeFromSuperview]; _help = nil;
 	static BOOL inited = NO;
 	retro_set_environment(core_env);
@@ -278,7 +304,7 @@ static OSStatus audio_render(void *ref, AudioUnitRenderActionFlags *flags, const
 	_help.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
 	UILabel *l = [[UILabel alloc] init];
 	l.numberOfLines = 0; l.textAlignment = NSTextAlignmentCenter; l.textColor = UIColor.whiteColor;
-	l.text = @"NBA Jam TE Rewind – Widescreen\n\nThis app needs your own NBA Jam TE rev 2.1 romset (nbajamte2.zip)\nwith the NBA Jam Rewind 1.1 patches applied.\nTap Import below and pick that zip (any file name).";
+	l.text = @"NBA Jam TE Rewind – Widescreen\n\nThis app needs your own NBA Jam TE rev 2.1 romset (nbajamte2.zip)\nwith the NBA Jam Rewind 1.1 patches applied (with or without the BLEEP extra).\nTap Import below and pick that zip (any file name).";
 	l.translatesAutoresizingMaskIntoConstraints = NO;
 	UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
 	[b setTitle:@"Import patched nbajamte2.zip" forState:UIControlStateNormal];
@@ -311,11 +337,21 @@ static OSStatus audio_render(void *ref, AudioUnitRenderActionFlags *flags, const
 {
 	BOOL scoped = [url startAccessingSecurityScopedResource];
 	NSFileManager *fm = NSFileManager.defaultManager;
-	[fm removeItemAtPath:self.romPath error:nil];
+	NSString *tmp = [self.docs stringByAppendingPathComponent:@"import.zip.tmp"];
+	[fm removeItemAtPath:tmp error:nil];
 	NSError *err = nil;
-	[fm copyItemAtURL:url toURL:[NSURL fileURLWithPath:self.romPath] error:&err];
+	[fm copyItemAtURL:url toURL:[NSURL fileURLWithPath:tmp] error:&err];
 	if (scoped) [url stopAccessingSecurityScopedResource];
 	if (err) { [self alert:@"Import failed" message:err.localizedDescription]; return; }
+	int v = romset_variant(tmp.fileSystemRepresentation);
+	if (v != ROMSET_REWIND && v != ROMSET_REWIND_BLEEP) {
+		[fm removeItemAtPath:tmp error:nil];
+		[self alert:@"Import failed" message:[self romProblem:v]];
+		return;
+	}
+	[fm removeItemAtPath:[self romPathFor:ROMSET_REWIND] error:nil];
+	[fm removeItemAtPath:[self romPathFor:ROMSET_REWIND_BLEEP] error:nil];
+	[fm moveItemAtPath:tmp toPath:[self romPathFor:v] error:nil];
 	if (!_running) [self tryStart];
 	else [self alert:@"ROM replaced" message:@"Close and reopen the app to use the new file."];
 }
@@ -585,7 +621,7 @@ typedef struct { float outW, outH, frameCount, curvature, wiggle, scanroll, vign
 }
 
 // ---------------------------------------------------------------- menu & states
-- (NSString *)statePath { return [self.docs stringByAppendingPathComponent:@"nbajamrw.state"]; }
+- (NSString *)statePath { return [self.romPath.stringByDeletingPathExtension stringByAppendingPathExtension:@"state"]; }
 - (void)saveState
 {
 	if (!_running) return;

@@ -6,8 +6,9 @@ the arcade's 400 pixels (about 15.4:9, with the same pixel shape as the original
 It is built on FinalBurn Neo (libretro), like the SSF2T widescreen project.
 
 No game files are included. You need your own **nbajamte2.zip** (NBA Jam TE rev 2.1 2/06/94,
-MAME/FBNeo romset) **with the NBA Jam Rewind 1.1 patches applied** (the 16 standard .bps patches;
-the optional "Get that BLEEP outta here" files are not supported).
+MAME/FBNeo romset) **with the NBA Jam Rewind 1.1 patches applied** (the 16 standard .bps patches, with or without the optional "Get that BLEEP outta here"
+files). The launchers recognise which version a zip is and load the matching driver
+(`nbajamrw` or `nbajamrwb`); an unpatched set is refused with a message.
 
 ## What changed for widescreen
 
