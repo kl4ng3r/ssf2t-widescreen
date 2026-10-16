@@ -58,3 +58,4 @@ targets:
       - sdk: AVFoundation.framework
       - sdk: UniformTypeIdentifiers.framework
       - sdk: QuartzCore.framework
+      - sdk: Metal.framework

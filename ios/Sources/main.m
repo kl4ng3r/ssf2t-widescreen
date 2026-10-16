@@ -6,6 +6,8 @@
 #import <AudioToolbox/AudioToolbox.h>
 #import <AVFoundation/AVFoundation.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+#import <Metal/Metal.h>
+#import <QuartzCore/CAMetalLayer.h>
 #include <stdatomic.h>
 #include "libretro.h"
 
@@ -125,6 +127,11 @@ static OSStatus audio_render(void *ref, AudioUnitRenderActionFlags *flags, const
 	int _testFrames; uint16_t _prevCombo;
 	GCVirtualController *_virtual; UIStackView *_bar; UIView *_help;
 	uint16_t _touchBits;                         // coin/start held via on-screen buttons
+	// CRT filter (newpixie, Metal; see newpixie.metal)
+	BOOL _crtOn; UIButton *_crtButton; CAMetalLayer *_crtLayer; uint32_t _crtFrame;
+	id<MTLDevice> _dev; id<MTLCommandQueue> _queue; id<MTLSamplerState> _samp;
+	id<MTLRenderPipelineState> _pAcc, _pBlurH, _pBlurV, _pCrt;
+	id<MTLTexture> _tSrc, _tAcc[2], _tBlur1, _tBlur2; int _accIdx;
 }
 
 - (NSString *)docs { return NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject; }
@@ -147,6 +154,11 @@ static OSStatus audio_render(void *ref, AudioUnitRenderActionFlags *flags, const
 	[_bar addArrangedSubview:[self barButton:@"COIN" tag:RETRO_DEVICE_ID_JOYPAD_SELECT]];
 	[_bar addArrangedSubview:[self barButton:@"START" tag:RETRO_DEVICE_ID_JOYPAD_START]];
 	[_bar addArrangedSubview:[self barButton:@"MENU" tag:-1]];
+	_crtButton = [self barButton:@"CRT" tag:-2];
+	[_bar addArrangedSubview:_crtButton];
+	_crtOn = [NSUserDefaults.standardUserDefaults boolForKey:@"crtFilter"];
+	[self setupCRT];
+	[self applyCRT];
 	[self.view addSubview:_bar];
 	[NSLayoutConstraint activateConstraints:@[
 		[_bar.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
@@ -169,7 +181,8 @@ static OSStatus audio_render(void *ref, AudioUnitRenderActionFlags *flags, const
 	b.layer.cornerRadius = 8;
 	b.contentEdgeInsets = UIEdgeInsetsMake(4, 12, 4, 12);
 	b.tag = tag;
-	if (tag < 0) [b addTarget:self action:@selector(showMenu) forControlEvents:UIControlEventTouchUpInside];
+	if (tag == -2) [b addTarget:self action:@selector(toggleCRT) forControlEvents:UIControlEventTouchUpInside];
+	else if (tag < 0) [b addTarget:self action:@selector(showMenu) forControlEvents:UIControlEventTouchUpInside];
 	else {
 		[b addTarget:self action:@selector(barDown:) forControlEvents:UIControlEventTouchDown];
 		[b addTarget:self action:@selector(barUp:) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel];
@@ -192,6 +205,11 @@ static OSStatus audio_render(void *ref, AudioUnitRenderActionFlags *flags, const
 	if (h > s.height) { h = s.height; w = h * g_aspect; }
 	[CATransaction begin]; [CATransaction setDisableActions:YES];
 	_screen.frame = CGRectMake((s.width - w) / 2, (s.height - h) / 2, w, h);
+	if (_crtLayer) {
+		_crtLayer.frame = _screen.frame;
+		CGFloat sc = self.view.window.screen.nativeScale ?: UIScreen.mainScreen.nativeScale;
+		_crtLayer.drawableSize = CGSizeMake(w * sc, h * sc);
+	}
 	[CATransaction commit];
 }
 
@@ -409,7 +427,10 @@ static uint16_t pad_bits(GCExtendedGamepad *g)
 	g_ratio = (_fps / hz) * (1.0 + adj);
 	if (fill < spf && runs) runs = 2;                                // underrun (e.g. after a pause): catch up once
 	for (int i = 0; i < runs; i++) retro_run();
-	if (g_newFrame && g_frame) {
+	if (g_newFrame && g_frame && _crtOn && _pCrt) {
+		g_newFrame = 0;
+		[self renderCRT];
+	} else if (g_newFrame && g_frame) {
 		g_newFrame = 0;
 		NSData *d = [NSData dataWithBytes:g_frame length:g_fw * g_fh * 4];
 		CGDataProviderRef p = CGDataProviderCreateWithCFData((__bridge CFDataRef)d);
@@ -420,6 +441,117 @@ static uint16_t pad_bits(GCExtendedGamepad *g)
 		[CATransaction commit];
 		CGImageRelease(img); CGDataProviderRelease(p);
 	}
+}
+
+// ---------------------------------------------------------------- CRT filter
+- (void)setupCRT
+{
+	_dev = MTLCreateSystemDefaultDevice();
+	if (!_dev) return;
+	_queue = [_dev newCommandQueue];
+	id<MTLLibrary> lib = [_dev newDefaultLibrary];
+	if (!lib) { NSLog(@"CRT: no Metal library"); return; }
+	id<MTLFunction> vs = [lib newFunctionWithName:@"np_vertex"];
+	_pAcc   = [self pipeline:lib vs:vs fs:@"np_accumulate"];
+	_pBlurH = [self pipeline:lib vs:vs fs:@"np_blur_h"];
+	_pBlurV = [self pipeline:lib vs:vs fs:@"np_blur_v"];
+	_pCrt   = [self pipeline:lib vs:vs fs:@"np_crt"];
+	MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new];
+	sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterLinear;
+	sd.sAddressMode = sd.tAddressMode = MTLSamplerAddressModeClampToZero;    // RetroArch default: clamp to border (black)
+	_samp = [_dev newSamplerStateWithDescriptor:sd];
+	_crtLayer = [CAMetalLayer layer];
+	_crtLayer.device = _dev;
+	_crtLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+	_crtLayer.framebufferOnly = YES;
+	_crtLayer.backgroundColor = UIColor.blackColor.CGColor;
+	_crtLayer.hidden = YES;
+	[self.view.layer insertSublayer:_crtLayer above:_screen];
+}
+- (id<MTLRenderPipelineState>)pipeline:(id<MTLLibrary>)lib vs:(id<MTLFunction>)vs fs:(NSString *)name
+{
+	MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
+	d.vertexFunction = vs; d.fragmentFunction = [lib newFunctionWithName:name];
+	d.colorAttachments[0].pixelFormat = [name isEqualToString:@"np_crt"] ? MTLPixelFormatBGRA8Unorm : MTLPixelFormatRGBA16Float;
+	NSError *e = nil; id<MTLRenderPipelineState> p = [_dev newRenderPipelineStateWithDescriptor:d error:&e];
+	if (!p) NSLog(@"CRT pipeline %@: %@", name, e);
+	return p;
+}
+- (id<MTLTexture>)tex:(MTLPixelFormat)f w:(NSUInteger)w h:(NSUInteger)h rt:(BOOL)rt
+{
+	MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:f width:w height:h mipmapped:NO];
+	d.usage = MTLTextureUsageShaderRead | (rt ? MTLTextureUsageRenderTarget : 0);
+	d.storageMode = rt ? MTLStorageModePrivate : MTLStorageModeShared;
+	return [_dev newTextureWithDescriptor:d];
+}
+- (void)toggleCRT
+{
+	_crtOn = !_crtOn;
+	[NSUserDefaults.standardUserDefaults setBool:_crtOn forKey:@"crtFilter"];
+	[self applyCRT];
+}
+- (void)applyCRT
+{
+	BOOL on = _crtOn && _pCrt;
+	_crtLayer.hidden = !on;
+	_screen.hidden = on;
+	[_crtButton setTitle:on ? @"CRT ON" : @"CRT" forState:UIControlStateNormal];
+	_crtButton.backgroundColor = on ? [UIColor colorWithRed:0.1 green:0.45 blue:0.2 alpha:0.6] : [UIColor colorWithWhite:0.15 alpha:0.45];
+	if (on) { _tAcc[0] = _tAcc[1] = nil; }                          // restart the phosphor buffer
+	[self.view setNeedsLayout];
+}
+typedef struct { float outW, outH, frameCount, curvature, wiggle, scanroll, vignette, ghosting, accModulate, blurX, blurY, pad; } NPParams;
+- (void)pass:(id<MTLCommandBuffer>)cb pipe:(id<MTLRenderPipelineState>)pipe to:(id<MTLTexture>)dst
+          tex0:(id<MTLTexture>)t0 tex1:(id<MTLTexture>)t1 params:(NPParams)prm
+{
+	MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+	rp.colorAttachments[0].texture = dst;
+	rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+	rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+	id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
+	[e setRenderPipelineState:pipe];
+	[e setFragmentTexture:t0 atIndex:0];
+	if (t1) [e setFragmentTexture:t1 atIndex:1];
+	[e setFragmentSamplerState:_samp atIndex:0];
+	prm.outW = dst.width; prm.outH = dst.height;
+	[e setFragmentBytes:&prm length:sizeof prm atIndex:0];
+	[e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+	[e endEncoding];
+}
+- (void)renderCRT
+{
+	if (!_tSrc || _tSrc.width != g_fw || _tSrc.height != g_fh) {
+		_tSrc = [self tex:MTLPixelFormatBGRA8Unorm w:g_fw h:g_fh rt:NO];
+		_tAcc[0] = _tAcc[1] = nil; _tBlur1 = _tBlur2 = nil;
+	}
+	if (!_tAcc[0]) {
+		_tAcc[0] = [self tex:MTLPixelFormatRGBA16Float w:g_fw h:g_fh rt:YES];
+		_tAcc[1] = [self tex:MTLPixelFormatRGBA16Float w:g_fw h:g_fh rt:YES];
+		_tBlur1 = [self tex:MTLPixelFormatRGBA16Float w:g_fw h:g_fh rt:YES];
+		_tBlur2 = [self tex:MTLPixelFormatRGBA16Float w:g_fw h:g_fh rt:YES];
+		// start the phosphor buffer from black
+		id<MTLCommandBuffer> cb = [_queue commandBuffer];
+		for (int i = 0; i < 2; i++) {
+			MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+			rp.colorAttachments[0].texture = _tAcc[i]; rp.colorAttachments[0].loadAction = MTLLoadActionClear;
+			rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0); rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+			[[cb renderCommandEncoderWithDescriptor:rp] endEncoding];
+		}
+		[cb commit];
+	}
+	[_tSrc replaceRegion:MTLRegionMake2D(0, 0, g_fw, g_fh) mipmapLevel:0 withBytes:g_frame bytesPerRow:g_fw * 4];
+	id<CAMetalDrawable> drawable = [_crtLayer nextDrawable];
+	if (!drawable) return;
+	NPParams prm = { 0, 0, (float)_crtFrame++, 0.5f /* curvature */, 0.0f, 1.0f, 1.0f, 1.0f, 0.65f, 1.0f, 1.0f, 0 };
+	id<MTLCommandBuffer> cb = [_queue commandBuffer];
+	id<MTLTexture> prev = _tAcc[_accIdx], acc = _tAcc[_accIdx ^ 1];
+	_accIdx ^= 1;
+	[self pass:cb pipe:_pAcc   to:acc     tex0:prev    tex1:_tSrc params:prm];
+	[self pass:cb pipe:_pBlurH to:_tBlur1 tex0:acc     tex1:nil   params:prm];
+	[self pass:cb pipe:_pBlurV to:_tBlur2 tex0:_tBlur1 tex1:nil   params:prm];
+	[self pass:cb pipe:_pCrt   to:drawable.texture tex0:acc tex1:_tBlur2 params:prm];
+	[cb presentDrawable:drawable];
+	[cb commit];
 }
 
 // ---------------------------------------------------------------- menu & states
@@ -446,6 +578,7 @@ static uint16_t pad_bits(GCExtendedGamepad *g)
 	[m addAction:[UIAlertAction actionWithTitle:@"Resume" style:UIAlertActionStyleCancel handler:^(UIAlertAction *a) { done(); }]];
 	[m addAction:[UIAlertAction actionWithTitle:@"Save State" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) { [ws saveState]; done(); }]];
 	[m addAction:[UIAlertAction actionWithTitle:@"Load State" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) { [ws loadState]; done(); }]];
+	[m addAction:[UIAlertAction actionWithTitle:_crtOn ? @"CRT Filter: On" : @"CRT Filter: Off" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) { [ws toggleCRT]; done(); }]];
 	[m addAction:[UIAlertAction actionWithTitle:@"Test Menu (difficulty etc.)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
 		GameVC *s = ws; if (s) s->_testFrames = 6; done(); }]];
 	[m addAction:[UIAlertAction actionWithTitle:@"Reset" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
