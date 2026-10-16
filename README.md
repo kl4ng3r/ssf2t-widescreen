@@ -24,6 +24,9 @@ files). The launchers recognise which version a zip is and load the matching dri
     arena art (at the ends you see exactly what the original showed, plus more of the court);
   * the off-screen player arrows move out to the new screen edges and only appear when a player is
     outside the wide picture.
+  * Reptile (Rewind's "?" team) gets head scale tables 17.5 % smaller, in normal and big-head
+    mode: his body animations use the game's smaller body table while his head used the normal
+    head table, so his head looked oversized next to Scorpion's.
 * Screens other than the court (title, team select, tonight's match-up, attract text screens) are
   400 pixels wide by design; their sides are shown black.
 

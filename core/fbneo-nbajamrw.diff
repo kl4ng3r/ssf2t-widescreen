@@ -111,7 +111,7 @@ index bdca0155a..1f31397fc 100644
  	{ "l2_nba_jam_tournament_game_rom_uj12.uj12",	0x080000, 0xeaa6fb32, 1 | BRF_PRG | BRF_ESS }, //  0 TMS34010
  	{ "l2_nba_jam_tournament_game_rom_ug12.ug12",	0x080000, 0x5a694d9a, 1 | BRF_PRG | BRF_ESS }, //  1
 diff --git a/src/burn/drv/midway/midtunit.cpp b/src/burn/drv/midway/midtunit.cpp
-index af93a99fd..229c1bfc5 100644
+index af93a99fd..dbc3906f5 100644
 --- a/src/burn/drv/midway/midtunit.cpp
 +++ b/src/burn/drv/midway/midtunit.cpp
 @@ -67,6 +67,11 @@ UINT8 TUnitIsMK2 = 0;
@@ -229,6 +229,11 @@ index af93a99fd..229c1bfc5 100644
  
  		service.Scan();
  	}
+@@ -1369,3 +1430,4 @@ INT32 TUnitScan(INT32 nAction, INT32 *pnMin)
+ 
+ 	return 0;
+ }
++
 diff --git a/src/burn/drv/midway/midtunit.h b/src/burn/drv/midway/midtunit.h
 index 24aef0289..89250c1e0 100644
 --- a/src/burn/drv/midway/midtunit.h
