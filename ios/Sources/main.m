@@ -23,9 +23,11 @@ static uint16_t g_pad[PORTS];                  // retro joypad bitmask per port 
 static float g_aspect = 16.0f / 9.0f;
 static int g_loaded;                           // game loaded (safe to save EEPROM)
 
-#define RING 32768                             // audio ring, stereo frames (power of two)
+#define RING 65536                             // audio ring, stereo frames (power of two)
 static int16_t g_ring[RING * 2];
 static _Atomic uint32_t g_rw, g_rr;
+static _Atomic uint32_t g_chunk = 512;          // frames iOS asked for in the last render call
+static _Atomic uint32_t g_underruns;            // render calls that ran out of sound
 
 static void core_log(enum retro_log_level l, const char *fmt, ...)
 {
@@ -108,11 +110,13 @@ static OSStatus audio_render(void *ref, AudioUnitRenderActionFlags *flags, const
                              UInt32 bus, UInt32 n, AudioBufferList *io)
 {
 	int16_t *out = io->mBuffers[0].mData;
+	atomic_store(&g_chunk, n);
 	uint32_t r = atomic_load(&g_rr), w = atomic_load(&g_rw);
 	for (UInt32 i = 0; i < n; i++) {
 		if (r != w) { out[i * 2] = g_ring[(r & (RING - 1)) * 2]; out[i * 2 + 1] = g_ring[(r & (RING - 1)) * 2 + 1]; r++; }
 		else { out[i * 2] = 0; out[i * 2 + 1] = 0; }
 	}
+	if (r == w && n) atomic_fetch_add(&g_underruns, 1);
 	atomic_store(&g_rr, r);
 	return noErr;
 }
@@ -124,7 +128,7 @@ static OSStatus audio_render(void *ref, AudioUnitRenderActionFlags *flags, const
 @implementation GameVC {
 	CALayer *_screen; CGColorSpaceRef _cs;
 	CADisplayLink *_link; AudioUnit _au;
-	BOOL _running, _paused, _menuOpen; double _rate, _fps, _acc; CFTimeInterval _lastTick;
+	BOOL _running, _paused, _menuOpen; double _rate, _fps, _acc; CFTimeInterval _lastTick; double _chunkMax; int _ticksSinceExtra;
 	UIView *_topCatcher; NSTimer *_hideTimer; BOOL _barShown;
 	int _testFrames; uint16_t _prevCombo;
 	GCVirtualController *_virtual; UIStackView *_bar; UIView *_help;
@@ -213,6 +217,9 @@ static OSStatus audio_render(void *ref, AudioUnitRenderActionFlags *flags, const
 	[nc addObserver:self selector:@selector(controllersChanged) name:GCControllerDidDisconnectNotification object:nil];
 	[nc addObserver:self selector:@selector(willResign) name:UIApplicationWillResignActiveNotification object:nil];
 	[nc addObserver:self selector:@selector(didBecomeActive) name:UIApplicationDidBecomeActiveNotification object:nil];
+	[nc addObserver:self selector:@selector(audioChanged:) name:AVAudioSessionRouteChangeNotification object:nil];
+	[nc addObserver:self selector:@selector(audioChanged:) name:AVAudioSessionInterruptionNotification object:nil];
+	[nc addObserver:self selector:@selector(audioReset) name:AVAudioSessionMediaServicesWereResetNotification object:nil];
 }
 
 - (UIButton *)barButton:(NSString *)title tag:(NSInteger)tag
@@ -295,6 +302,7 @@ static OSStatus audio_render(void *ref, AudioUnitRenderActionFlags *flags, const
 	_link.preferredFrameRateRange = CAFrameRateRangeMake(60, 60, 60);
 	[_link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
 	_running = YES;
+	UIApplication.sharedApplication.idleTimerDisabled = YES;   // controller play doesn't count as touching the screen
 }
 
 - (void)showHelp
@@ -383,6 +391,26 @@ static OSStatus audio_render(void *ref, AudioUnitRenderActionFlags *flags, const
 	AudioUnitSetProperty(_au, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0, &cb, sizeof cb);
 	AudioUnitInitialize(_au);
 	AudioOutputUnitStart(_au);
+}
+
+// route changes (headphones, Bluetooth) and interruptions (calls, Siri) can stop the output unit
+- (void)audioChanged:(NSNotification *)n
+{
+	if ([n.name isEqualToString:AVAudioSessionInterruptionNotification] &&
+	    [n.userInfo[AVAudioSessionInterruptionTypeKey] unsignedIntegerValue] == AVAudioSessionInterruptionTypeBegan) return;
+	dispatch_async(dispatch_get_main_queue(), ^{
+		if (!self->_au || self->_paused) return;
+		[AVAudioSession.sharedInstance setActive:YES error:nil];
+		AudioOutputUnitStop(self->_au); AudioOutputUnitStart(self->_au);
+	});
+}
+// the audio system restarted: the old unit is gone, build a new one
+- (void)audioReset
+{
+	dispatch_async(dispatch_get_main_queue(), ^{
+		if (self->_au) { AudioOutputUnitStop(self->_au); AudioComponentInstanceDispose(self->_au); self->_au = NULL; }
+		if (self->_running) [self startAudio];
+	});
 }
 
 // ---------------------------------------------------------------- controllers
@@ -475,10 +503,11 @@ static uint16_t pad_bits(GCExtendedGamepad *g)
 	if (!_running || _paused) return;
 	[self readInput];
 	if (_paused) return;
-	// The arcade runs at 54.71 Hz, slower than the display. Emulated frames are paced by the real
-	// time between display-link callbacks (a late or skipped callback still counts), and the audio
-	// buffer level steers both the resampler (up to +-1 %) and, if it drifts too far, the frame count,
-	// so the buffer can neither run dry (crackles, gaps) nor fill up (dropped samples).
+	// The arcade runs at 54.71 Hz. Emulated frames are paced only by the real time between
+	// display-link callbacks (a late or skipped callback still counts). The audio buffer is kept at
+	// a level that covers the chunk size iOS currently pulls (it grows them when the screen dims or
+	// for Bluetooth), with the resampler nudging up to +-1 %; at most one extra frame every half
+	// second tops it up when it is about to run dry, so the game speed never follows the audio.
 	CFTimeInterval now = _link.timestamp;
 	double dt = _lastTick > 0 ? now - _lastTick : 1.0 / 60.0;
 	_lastTick = now;
@@ -486,7 +515,10 @@ static uint16_t pad_bits(GCExtendedGamepad *g)
 	if (dt > 0.1) dt = 0.1;                                          // after a pause / stall
 	double spf = _rate / _fps;                                       // output frames per emulated frame
 	double fill = (double)(atomic_load(&g_rw) - atomic_load(&g_rr));
+	double chunk = atomic_load(&g_chunk);
+	_chunkMax = chunk > _chunkMax * 0.999 ? chunk : _chunkMax * 0.999;
 	double target = 6 * spf;                                         // ~110 ms of sound buffered
+	if (target < 2.5 * _chunkMax + spf) target = 2.5 * _chunkMax + spf;
 	double adj = (target - fill) / target * 0.01;
 	if (adj > 0.01) adj = 0.01;
 	if (adj < -0.01) adj = -0.01;
@@ -495,8 +527,9 @@ static uint16_t pad_bits(GCExtendedGamepad *g)
 	int runs = 0;
 	while (_acc >= 1.0 / _fps && runs < 6) { _acc -= 1.0 / _fps; runs++; }
 	if (_acc > 0.2) _acc = 0;
-	if (fill < 1.5 * spf && runs < 6) runs++;                         // nearly empty: one more frame
-	if (fill > 2.5 * target) runs = 0;                                // far too full: skip a frame
+	_ticksSinceExtra++;
+	if (fill < _chunkMax && _ticksSinceExtra > 30) { runs++; _ticksSinceExtra = 0; }
+	if (fill > RING - 4 * spf) runs = 0;                             // buffer full (audio not playing)
 	for (int i = 0; i < runs; i++) retro_run();
 	if (g_newFrame && g_frame && _crtOn && _pCrt) {
 		g_newFrame = 0;
@@ -643,7 +676,11 @@ typedef struct { float outW, outH, frameCount, curvature, wiggle, scanroll, vign
 {
 	if (_menuOpen) return;
 	_menuOpen = YES; _paused = YES;
-	UIAlertController *m = [UIAlertController alertControllerWithTitle:@"NBA Jam TE Widescreen" message:nil preferredStyle:UIAlertControllerStyleAlert];
+	double fill = (double)(atomic_load(&g_rw) - atomic_load(&g_rr));
+	AVAudioSession *as = AVAudioSession.sharedInstance;
+	NSString *info = [NSString stringWithFormat:@"Audio: %.0f Hz, chunk %u, IO %.0f ms, buffer %.0f ms, gaps %u",
+	                  as.sampleRate, atomic_load(&g_chunk), as.IOBufferDuration * 1000, fill / (_rate > 0 ? _rate : 48000) * 1000, atomic_load(&g_underruns)];
+	UIAlertController *m = [UIAlertController alertControllerWithTitle:@"NBA Jam TE Widescreen" message:info preferredStyle:UIAlertControllerStyleAlert];
 	__weak GameVC *ws = self;
 	void (^done)(void) = ^{ GameVC *s = ws; if (s) { s->_menuOpen = NO; s->_paused = NO; } };
 	[m addAction:[UIAlertAction actionWithTitle:@"Resume" style:UIAlertActionStyleCancel handler:^(UIAlertAction *a) { done(); }]];

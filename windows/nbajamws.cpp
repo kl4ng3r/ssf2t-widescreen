@@ -159,6 +159,7 @@ static double g_fps = 54.71, g_rate = 48000;
 static int16_t g_ring[RING * 2];
 static std::atomic<uint32_t> g_rw(0), g_rr(0);
 static double g_ratio = 1.0, g_pos = 0.0;
+static int have_samples = 512;            // audio device chunk size (frames)
 static int16_t g_last[2];
 
 static void core_log(enum retro_log_level, const char *fmt, ...)
@@ -830,7 +831,7 @@ int main(int argc, char **argv)
 	SDL_AudioSpec want = {}, have = {};
 	want.freq = (int)lround(g_rate); want.format = AUDIO_S16SYS; want.channels = 2; want.samples = 512; want.callback = audio_cb;
 	SDL_AudioDeviceID audio = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
-	if (audio) SDL_PauseAudioDevice(audio, 0);
+	if (audio) { have_samples = have.samples ? have.samples : 512; SDL_PauseAudioDevice(audio, 0); }
 
 	if (optMenu) menu_open();
 	show_bar();
@@ -937,8 +938,11 @@ int main(int argc, char **argv)
 			acc += dt < 0.1 ? dt : 0.1;
 			while (acc >= 1.0 / g_fps && runs < 6) { acc -= 1.0 / g_fps; runs++; }
 			if (acc > 0.2) acc = 0;
-			if (fill < 1.5 * spf && runs < 6) runs++;                  // nearly empty: one more frame
-			if (fill > 2.5 * target) runs = 0;                          // far too full: skip a frame
+			// game speed follows the clock only; at most one extra frame every half second tops up
+			// a buffer that is about to run dry
+			static int sinceExtra = 0;
+			if (++sinceExtra > 30 && fill < 2 * have_samples) { runs++; sinceExtra = 0; }
+			if (fill > RING - 4 * spf) runs = 0;                        // buffer full (audio not playing)
 			if (shotPath) runs = 1;                                     // test mode: one frame per loop
 			for (int i = 0; i < runs; i++) { retro_run(); framesRun++; }
 		} else acc = 0;
