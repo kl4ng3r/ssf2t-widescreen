@@ -123,7 +123,8 @@ static OSStatus audio_render(void *ref, AudioUnitRenderActionFlags *flags, const
 @implementation GameVC {
 	CALayer *_screen; CGColorSpaceRef _cs;
 	CADisplayLink *_link; AudioUnit _au;
-	BOOL _running, _paused, _menuOpen, _odd; double _rate, _fps;
+	BOOL _running, _paused, _menuOpen, _odd, _userPaused, _prevStart; double _rate, _fps;
+	UILabel *_pauseLabel; UIView *_topCatcher; NSTimer *_hideTimer; BOOL _barShown;
 	int _testFrames; uint16_t _prevCombo;
 	GCVirtualController *_virtual; UIStackView *_bar; UIView *_help;
 	uint16_t _touchBits;                         // coin/start held via on-screen buttons
@@ -164,6 +165,40 @@ static OSStatus audio_render(void *ref, AudioUnitRenderActionFlags *flags, const
 		[_bar.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
 		[_bar.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:4] ]];
 
+	// the buttons hide after 5 s without a touch in the upper part of the screen; touching there shows them
+	_topCatcher = [[UIView alloc] init];
+	_topCatcher.backgroundColor = UIColor.clearColor;
+	_topCatcher.translatesAutoresizingMaskIntoConstraints = NO;
+	[self.view insertSubview:_topCatcher belowSubview:_bar];
+	[NSLayoutConstraint activateConstraints:@[
+		[_topCatcher.leftAnchor constraintEqualToAnchor:self.view.leftAnchor],
+		[_topCatcher.rightAnchor constraintEqualToAnchor:self.view.rightAnchor],
+		[_topCatcher.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+		[_topCatcher.heightAnchor constraintEqualToAnchor:self.view.heightAnchor multiplier:0.25] ]];
+	UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(topTouched)];
+	tap.cancelsTouchesInView = NO;
+	[_topCatcher addGestureRecognizer:tap];
+	UILongPressGestureRecognizer *press = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(topTouched)];
+	press.minimumPressDuration = 0; press.cancelsTouchesInView = NO;
+	[_topCatcher addGestureRecognizer:press];
+	[self showBar];
+
+	// "PAUSED" overlay (controller Start during a fight)
+	_pauseLabel = [[UILabel alloc] init];
+	_pauseLabel.text = @"PAUSED";
+	_pauseLabel.font = [UIFont boldSystemFontOfSize:36];
+	_pauseLabel.textColor = UIColor.whiteColor;
+	_pauseLabel.backgroundColor = [UIColor colorWithWhite:0 alpha:0.55];
+	_pauseLabel.textAlignment = NSTextAlignmentCenter;
+	_pauseLabel.layer.cornerRadius = 12; _pauseLabel.clipsToBounds = YES;
+	_pauseLabel.hidden = YES;
+	_pauseLabel.translatesAutoresizingMaskIntoConstraints = NO;
+	[self.view addSubview:_pauseLabel];
+	[NSLayoutConstraint activateConstraints:@[
+		[_pauseLabel.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+		[_pauseLabel.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor],
+		[_pauseLabel.widthAnchor constraintEqualToConstant:220], [_pauseLabel.heightAnchor constraintEqualToConstant:70] ]];
+
 	NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
 	[nc addObserver:self selector:@selector(controllersChanged) name:GCControllerDidConnectNotification object:nil];
 	[nc addObserver:self selector:@selector(controllersChanged) name:GCControllerDidDisconnectNotification object:nil];
@@ -189,7 +224,7 @@ static OSStatus audio_render(void *ref, AudioUnitRenderActionFlags *flags, const
 	}
 	return b;
 }
-- (void)barDown:(UIButton *)b { _touchBits |= 1 << b.tag; }
+- (void)barDown:(UIButton *)b { _touchBits |= 1 << b.tag; [self showBar]; }
 - (void)barUp:(UIButton *)b { _touchBits &= ~(1 << b.tag); }
 
 - (BOOL)prefersStatusBarHidden { return YES; }
@@ -392,12 +427,17 @@ static uint16_t pad_bits(GCExtendedGamepad *g)
 		if (lb && g.buttonMenu.pressed) combo |= 2;                                          // LB+Start: save
 		if (lb && g.buttonOptions.pressed) combo |= 4;                                       // LB+Coin: load
 		if (lb) st[0] &= ~((1 << RETRO_DEVICE_ID_JOYPAD_START) | (1 << RETRO_DEVICE_ID_JOYPAD_SELECT));
+		// player 1's Start pauses / resumes during a fight (and while paused); elsewhere it is the arcade Start
+		BOOL start = g.buttonMenu.pressed && !lb;
+		if (start && !_prevStart && (_userPaused || in_fight())) [self setUserPaused:!_userPaused];
+		if (start && (_userPaused || in_fight())) { st[0] &= ~(1 << RETRO_DEVICE_ID_JOYPAD_START); }
+		_prevStart = start;
 	} else if (_virtual) {
 		st[0] = pad_bits(_virtual.controller.extendedGamepad);
 	}
 	st[0] |= _touchBits;
 	uint16_t pressed = combo & ~_prevCombo; _prevCombo = combo;
-	if (pressed & 1) [self showMenu];
+	if (pressed & 1) { [self setUserPaused:NO]; [self showMenu]; }
 	if (pressed & 2) [self saveState];
 	if (pressed & 4) [self loadState];
 	if (_testFrames > 0) {                              // hold Start + L + R: the core opens the test menu
@@ -407,12 +447,42 @@ static uint16_t pad_bits(GCExtendedGamepad *g)
 	g_pad[0] = st[0]; g_pad[1] = st[1];
 }
 
+// ---------------------------------------------------------------- auto-hiding buttons, pause
+- (void)topTouched { [self showBar]; }
+- (void)showBar
+{
+	[_hideTimer invalidate];
+	_hideTimer = [NSTimer scheduledTimerWithTimeInterval:5.0 target:self selector:@selector(hideBar) userInfo:nil repeats:NO];
+	if (_barShown) return;
+	_barShown = YES; _bar.userInteractionEnabled = YES;
+	[UIView animateWithDuration:0.2 animations:^{ self->_bar.alpha = 1.0; }];
+}
+- (void)hideBar
+{
+	if (_menuOpen || _help) { [self showBar]; return; }
+	_barShown = NO; _bar.userInteractionEnabled = NO;
+	[UIView animateWithDuration:0.4 animations:^{ self->_bar.alpha = 0.0; }];
+}
+// true while a round is being fought (the arcade's Start button does nothing for that player then)
+static BOOL in_fight(void)
+{
+	uint8_t *m = retro_get_memory_data(RETRO_MEMORY_SYSTEM_RAM);
+	if (!m || retro_get_memory_size(RETRO_MEMORY_SYSTEM_RAM) < 0x10000) return NO;
+	return m[0x8ece ^ 1] == 1 && m[0x8005 ^ 1] == 4 && m[0x8009 ^ 1] == 10;
+}
+- (void)setUserPaused:(BOOL)p
+{
+	_userPaused = p;
+	_pauseLabel.hidden = !p;
+	if (p) [self showBar];
+}
+
 // ---------------------------------------------------------------- main loop
 - (void)tick
 {
 	if (!_running || _paused) return;
 	[self readInput];
-	if (_paused) return;
+	if (_paused || _userPaused) return;
 	// one emulated frame per display refresh; audio is stretched to match (see core_audio_batch)
 	double hz = 60.0;
 	if (_link.targetTimestamp > _link.timestamp) hz = 1.0 / (_link.targetTimestamp - _link.timestamp);
