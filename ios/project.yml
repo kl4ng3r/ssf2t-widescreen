@@ -14,7 +14,7 @@ targets:
     info:
       path: Sources/Info.plist
       properties:
-        CFBundleDisplayName: Super Street Fighter 2 TURBO
+        CFBundleDisplayName: SSF2T
         CFBundleShortVersionString: "1.0"
         CFBundleVersion: "1"
         UILaunchScreen: {}
