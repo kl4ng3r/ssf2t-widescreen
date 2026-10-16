@@ -1,0 +1,278 @@
+diff --git a/src/burn/drv/midway/d_tunit.cpp b/src/burn/drv/midway/d_tunit.cpp
+index bdca0155a..ddf6a3646 100644
+--- a/src/burn/drv/midway/d_tunit.cpp
++++ b/src/burn/drv/midway/d_tunit.cpp
+@@ -1425,6 +1425,14 @@ static INT32 NbajamteInit()
+ 	return TUnitInit();
+ }
+ 
++static INT32 NbajamrwInit()
++{
++	TUnitIsNbajamTe = 1;
++	TUnitWide = 1;
++
++	return TUnitInit();
++}
++
+ struct BurnDriver BurnDrvNbajamte = {
+ 	"nbajamte", NULL, NULL, NULL, "1994",
+ 	"NBA Jam Tournament Edition (rev 4.0 3/23/94)\0", NULL, "Midway", "Midway T-Unit",
+@@ -1607,6 +1615,49 @@ struct BurnDriver BurnDrvNbajamte2 = {
+     TUNIT_SCREEN_WIDTH, TUNIT_SCREEN_HEIGHT, 4, 3
+ };
+ 
++static struct BurnRomInfo nbajamrwRomDesc[] = {
++	{ "l2.1_nba_jam_tournament_game_rom_uj12.uj12",	0x080000, 0x9b3fc483, 1 | BRF_PRG | BRF_ESS }, //  0 TMS34010
++	{ "l2.1_nba_jam_tournament_game_rom_ug12.ug12",	0x080000, 0x18e75204, 1 | BRF_PRG | BRF_ESS }, //  1
++	
++	{ "l1_nba_jam_tournament_u3_sound_rom.u3",		0x020000, 0xd4551195, 4 | BRF_PRG | BRF_ESS  }, // 2 Sound CPU
++	
++	{ "l1_nba_jam_tournament_u12_sound_rom.u12",	0x080000, 0xcd5d4532, 2 | BRF_PRG | BRF_ESS }, //  3 ADPCM sound banks
++	{ "l1_nba_jam_tournament_u13_sound_rom.u13",	0x080000, 0xe92fb0d3, 2 | BRF_PRG | BRF_ESS }, //  4
++
++	{ "l1_nba_jam_tournament_game_rom_ug14.ug14",	0x080000, 0x04bb9f64, 3 | BRF_GRA | BRF_ESS | TUNIT_GFX(0x00, 0) }, //  5 GFX
++	{ "l1_nba_jam_tournament_game_rom_uj14.uj14",	0x080000, 0xb34b7af3, 3 | BRF_GRA | BRF_ESS | TUNIT_GFX(0x00, 1) }, //  6
++	{ "l1_nba_jam_tournament_game_rom_ug19.ug19",	0x080000, 0xa8f22fbb, 3 | BRF_GRA | BRF_ESS | TUNIT_GFX(0x00, 2) }, //  7
++	{ "l1_nba_jam_tournament_game_rom_uj19.uj19",	0x080000, 0x8130a8a2, 3 | BRF_GRA | BRF_ESS | TUNIT_GFX(0x00, 3) }, //  8
++
++	{ "l1_nba_jam_tournament_game_rom_ug16.ug16",	0x080000, 0xb9a07a6f, 3 | BRF_GRA | BRF_ESS | TUNIT_GFX(0x02, 0) }, //  9
++	{ "l1_nba_jam_tournament_game_rom_uj16.uj16",	0x080000, 0xffa7db04, 3 | BRF_GRA | BRF_ESS | TUNIT_GFX(0x02, 1) }, // 10
++	{ "l1_nba_jam_tournament_game_rom_ug20.ug20",	0x080000, 0x67c8646b, 3 | BRF_GRA | BRF_ESS | TUNIT_GFX(0x02, 2) }, // 11
++	{ "l1_nba_jam_tournament_game_rom_uj20.uj20",	0x080000, 0x71d028f8, 3 | BRF_GRA | BRF_ESS | TUNIT_GFX(0x02, 3) }, // 12
++
++	{ "l1_nba_jam_tournament_game_rom_ug17.ug17",	0x080000, 0x34c6bdb8, 3 | BRF_GRA | BRF_ESS | TUNIT_GFX(0x04, 0) }, // 13
++	{ "l1_nba_jam_tournament_game_rom_uj17.uj17",	0x080000, 0x3af5b32e, 3 | BRF_GRA | BRF_ESS | TUNIT_GFX(0x04, 1) }, // 14
++	{ "l1_nba_jam_tournament_game_rom_ug22.ug22",	0x080000, 0xd41234d2, 3 | BRF_GRA | BRF_ESS | TUNIT_GFX(0x04, 2) }, // 15
++	{ "l1_nba_jam_tournament_game_rom_uj22.uj22",	0x080000, 0x42196c84, 3 | BRF_GRA | BRF_ESS | TUNIT_GFX(0x04, 3) }, // 16
++	
++	{ "l1_nba_jam_tournament_game_rom_ug18.ug18",	0x080000, 0xfe18a6ef, 3 | BRF_GRA | BRF_ESS | TUNIT_GFX(0x06, 0) }, // 17
++	{ "l1_nba_jam_tournament_game_rom_uj18.uj18",	0x080000, 0x9a6d36de, 3 | BRF_GRA | BRF_ESS | TUNIT_GFX(0x06, 1) }, // 18
++	{ "l1_nba_jam_tournament_game_rom_ug23.ug23",	0x080000, 0x8d1af1a6, 3 | BRF_GRA | BRF_ESS | TUNIT_GFX(0x06, 2) }, // 19
++	{ "l1_nba_jam_tournament_game_rom_uj23.uj23",	0x080000, 0xb5bf66f9, 3 | BRF_GRA | BRF_ESS | TUNIT_GFX(0x06, 3) }, // 20
++};
++
++STD_ROM_PICK(nbajamrw)
++STD_ROM_FN(nbajamrw)
++
++struct BurnDriver BurnDrvNbajamrw = {
++	"nbajamrw", "nbajamte", NULL, NULL, "1994",
++	"NBA Jam Tournament Edition (rev 2.1, Rewind 1.1 hack, 16:9 widescreen)\0", NULL, "Midway", "Midway T-Unit",
++	NULL, NULL, NULL, NULL,
++	BDF_GAME_WORKING | BDF_CLONE | BDF_HACK, 4, HARDWARE_MIDWAY_TUNIT, GBF_SPORTSMISC, 0,
++	NULL, nbajamrwRomInfo, nbajamrwRomName, NULL, NULL, NULL, NULL, NbajamInputInfo, NbajamteDIPInfo,
++	NbajamrwInit, TUnitExit, TUnitFrame, TUnitDraw, TUnitScan, &nTUnitRecalc, 0x8000,
++	TUNIT_WS_WIDTH, TUNIT_SCREEN_HEIGHT, 128, 75   // same pixel shape as the 400-pixel 4:3 original
++};
++
+ static struct BurnRomInfo nbajamte2aRomDesc[] = {
+ 	{ "l2_nba_jam_tournament_game_rom_uj12.uj12",	0x080000, 0xeaa6fb32, 1 | BRF_PRG | BRF_ESS }, //  0 TMS34010
+ 	{ "l2_nba_jam_tournament_game_rom_ug12.ug12",	0x080000, 0x5a694d9a, 1 | BRF_PRG | BRF_ESS }, //  1
+diff --git a/src/burn/drv/midway/midtunit.cpp b/src/burn/drv/midway/midtunit.cpp
+index af93a99fd..e0f3ae591 100644
+--- a/src/burn/drv/midway/midtunit.cpp
++++ b/src/burn/drv/midway/midtunit.cpp
+@@ -67,6 +67,11 @@ UINT8 TUnitIsMK2 = 0;
+ UINT8 TUnitIsNbajam = 0;
+ UINT8 TUnitIsNbajamp = 0;
+ UINT8 TUnitIsNbajamTe = 0;
++UINT8 TUnitWide = 0;          // widescreen hack (nbajamrw)
++static INT32 nWsDrawPage = 0;   // VRAM page the game is drawing into
++static INT32 nWsCourt[2] = { 0, 0 };   // page holds a court (full-width) picture
++static UINT8 nWsLineCourt[256];        // per screen line: shown full width
++static void TUnitWsApplyPatches();
+ UINT8 TUnitIsJdreddp = 0;
+ 
+ static INT32 vb_start = 0;
+@@ -537,6 +542,18 @@ static INT32 ScanlineRender(INT32 line, TMS34010Display *info)
+ 
+ 	if (!info->enabled) heblnk = hsblnk; // blank line!
+ 
++	nWsLineCourt[line] = 0;
++	if (TUnitWide && info->enabled) {
++		// widescreen: the whole 512-pixel VRAM row (the game's 400-pixel picture is columns 56-455)
++		// Only the court is drawn full width; other screens are 400 pixels wide with stale or
++		// partial graphics beside them, so their side strips are shown black.
++		// (palette entry 0 is not always black, so TUnitDraw blacks them out after the colour conversion)
++		nWsLineCourt[line] = nWsCourt[(info->rowaddr >> 8) & 1];
++		for (INT32 x = 0; x < nScreenWidth; x++)
++			dest[x] = BURN_ENDIAN_SWAP_INT16(src[x] & BURN_ENDIAN_SWAP_INT16(0x7FFF));
++		return 0;
++	}
++
+ 	if ((hsblnk - heblnk) < nScreenWidth) {
+ 		for (INT32 x = 0; x < nScreenWidth; x++) {
+ 			dest[x] = 0;
+@@ -1172,11 +1189,36 @@ INT32 TUnitInit()
+ 
+ 	GenericTilesInit();
+ 
++	if (TUnitWide) TUnitWsApplyPatches();
++
+ 	TUnitDoReset();
+ 
+ 	return 0;
+ }
+ 
++// ---- Widescreen hack (nbajamrw): game-code patches, verified against the original words first.
++// If any word does not match (different ROM revision), nothing is patched.
++struct WsPatch { UINT32 addr; UINT16 orig; UINT16 val; };
++#include "nbajamrw_patches.h"
++
++static void TUnitWsApplyPatches()
++{
++	INT32 n = 0, bad = 0;
++	for (INT32 i = 0; NbajamrwPatches[i].addr; i++, n++) {
++		UINT8 *w = DrvBootROM + ((NbajamrwPatches[i].addr - 0xff800000) >> 3);
++		if ((w[0] | (w[1] << 8)) != NbajamrwPatches[i].orig) {
++			bprintf(PRINT_ERROR, _T("nbajamrw: mismatch at %08x: %02x%02x\n"), NbajamrwPatches[i].addr, w[1], w[0]);
++			bad++;
++		}
++	}
++	if (bad) { bprintf(PRINT_ERROR, _T("nbajamrw: %d of %d patch sites do not match, game patches skipped\n"), bad, n); return; }
++	for (INT32 i = 0; NbajamrwPatches[i].addr; i++) {
++		UINT8 *w = DrvBootROM + ((NbajamrwPatches[i].addr - 0xff800000) >> 3);
++		w[0] = NbajamrwPatches[i].val & 0xff; w[1] = NbajamrwPatches[i].val >> 8;
++	}
++	bprintf(PRINT_NORMAL, _T("nbajamrw: applied %d widescreen patch words\n"), n);
++}
++
+ static void MakeInputs()
+ {
+ 	service.Toggle(nTUnitJoy2[4]);
+@@ -1219,6 +1261,8 @@ INT32 TUnitExit()
+ 	TUnitIsNbajamp = 0;
+ 	TUnitIsNbajamTe = 0;
+ 	TUnitIsJdreddp = 0;
++	TUnitWide = 0;
++	nWsCourt[0] = nWsCourt[1] = 0;
+ 
+ 	SoundProtAddressStart = 0;
+ 	SoundProtAddressEnd = 0;
+@@ -1236,6 +1280,16 @@ INT32 TUnitDraw()
+ 	// TMS34010 renders scanlines direct to pTransDraw
+ 	BurnTransferCopy(DrvPaletteB);
+ 
++	if (TUnitWide && pBurnDraw) {
++		// widescreen: black side strips on lines that do not show the court
++		for (INT32 y = 0; y < nScreenHeight && y < 256; y++) {
++			if (nWsLineCourt[y]) continue;
++			UINT8 *row = pBurnDraw + y * nBurnPitch;
++			memset(row, 0, TUNIT_WS_OFF * nBurnBpp);
++			memset(row + (TUNIT_WS_OFF + TUNIT_SCREEN_WIDTH) * nBurnBpp, 0, (nScreenWidth - TUNIT_WS_OFF - TUNIT_SCREEN_WIDTH) * nBurnBpp);
++		}
++	}
++
+ 	return 0;
+ }
+ 
+@@ -1352,6 +1406,10 @@ INT32 TUnitScan(INT32 nAction, INT32 *pnMin)
+ 		SCAN_VAR(JdreddpProtTable);
+ 
+ 		SCAN_VAR(nExtraCycles);
++		if (TUnitWide) {
++			SCAN_VAR(nWsDrawPage);
++			SCAN_VAR(nWsCourt);
++		}
+ 
+ 		service.Scan();
+ 	}
+diff --git a/src/burn/drv/midway/midtunit.h b/src/burn/drv/midway/midtunit.h
+index 24aef0289..89250c1e0 100644
+--- a/src/burn/drv/midway/midtunit.h
++++ b/src/burn/drv/midway/midtunit.h
+@@ -13,6 +13,8 @@ extern UINT8 nTUnitRecalc;
+ #define TUNIT_GFX_OFF(value)	((value & (7 << 8)) >> 8)
+ 
+ #define TUNIT_SCREEN_WIDTH  400
++#define TUNIT_WS_WIDTH      512   // widescreen hack: full 512-pixel VRAM row
++#define TUNIT_WS_OFF        56    // game x 0 is drawn at VRAM column 56
+ // standalone builds have an issue where filters don't work properly
+ // if height is not divisible by 4
+ #ifndef __LIBRETRO__
+@@ -34,3 +36,4 @@ extern UINT8 TUnitIsNbajam;
+ extern UINT8 TUnitIsNbajamp;
+ extern UINT8 TUnitIsNbajamTe;
+ extern UINT8 TUnitIsJdreddp;
++extern UINT8 TUnitWide;
+diff --git a/src/burn/drv/midway/midtunit_dma.h b/src/burn/drv/midway/midtunit_dma.h
+index c9d8fca22..5a9420aa3 100644
+--- a/src/burn/drv/midway/midtunit_dma.h
++++ b/src/burn/drv/midway/midtunit_dma.h
+@@ -383,6 +383,19 @@ static void TUnitDmaWrite(UINT32 address, UINT16 value)
+     dma_state->botclip = nDMA[DMA_BOTCLIP] & 0x1ff;
+     dma_state->leftclip = nDMA[DMA_LEFTCLIP] & 0x3ff;
+     dma_state->rightclip = nDMA[DMA_RIGHTCLIP] & 0x3ff;
++    if (TUnitWide) {
++        // widescreen: remember which VRAM page (rows 0-255 / 256-511) holds a court picture.
++        // The court floor is the only thing drawn as 512x1 lines at x 0 (patched floor routine);
++        // the first blit into the other page starts a new picture there.
++        INT32 page = (dma_state->ypos >> 8) & 1;
++        if (page != nWsDrawPage) { nWsDrawPage = page; nWsCourt[page] = 0; }
++        if (dma_state->width == 512 && dma_state->height == 1 && dma_state->xpos == 0) nWsCourt[page] = 1;
++
++        // widescreen: a clip at the edge of the 400-pixel picture (VRAM columns 56-455)
++        // is moved to the edge of the 512-pixel row
++        if (dma_state->leftclip <= TUNIT_WS_OFF) dma_state->leftclip = 0;
++        if (dma_state->rightclip >= TUNIT_WS_OFF + TUNIT_SCREEN_WIDTH - 1) dma_state->rightclip = 511;
++    }
+ 
+     /* determine the offset */
+     gfxoffset = nDMA[DMA_OFFSETLO] | (nDMA[DMA_OFFSETHI] << 16);
+diff --git a/src/burner/libretro/Makefile.tunit b/src/burner/libretro/Makefile.tunit
+new file mode 100644
+index 000000000..5bf18e302
+--- /dev/null
++++ b/src/burner/libretro/Makefile.tunit
+@@ -0,0 +1,34 @@
++# Drivers, cpus and devices for the Midway T-Unit subset (NBA Jam TE widescreen)
++SOURCES_C += $(FBNEO_BURN_SND_DIR)/ym2151.c \
++	$(FBNEO_BURN_SND_DIR)/fm.c \
++	$(FBNEO_BURN_SND_DIR)/ymdeltat.c \
++	$(FBNEO_BURN_SND_DIR)/ay8910.c
++
++SOURCES_CXX += $(FBNEO_CPU_DIR)/tms34_intf.cpp \
++	$(TMS34010_CPU_DIR)/tms34010.cpp \
++	$(FBNEO_CPU_DIR)/m6809_intf.cpp \
++	$(M6809_CPU_DIR)/m6809.cpp \
++	$(FBNEO_CPU_DIR)/adsp2100_intf.cpp \
++	$(ADSP2100_CPU_DIR)/adsp2100.cpp \
++	$(FBNEO_CPU_DIR)/z80_intf.cpp \
++	$(Z80_CPU_DIR)/z80.cpp \
++	$(Z80_CPU_DIR)/z80daisy.cpp \
++	$(Z80_CPU_DIR)/z80ctc.cpp \
++	$(Z80_CPU_DIR)/z80pio.cpp \
++	$(FBNEO_BURN_SND_DIR)/burn_ym2203.cpp \
++	$(FBNEO_BURN_SND_DIR)/burn_ym2608.cpp \
++	$(FBNEO_BURN_SND_DIR)/burn_ym2610.cpp \
++	$(FBNEO_BURN_SND_DIR)/burn_ym2612.cpp \
++	$(FBNEO_BURN_SND_DIR)/burn_ym2151.cpp \
++	$(FBNEO_BURN_SND_DIR)/msm6295.cpp \
++	$(FBNEO_BURN_SND_DIR)/dac.cpp \
++	$(FBNEO_BURN_DEVICES_DIR)/joyprocess.cpp \
++	$(FBNEO_BURN_DIR)/tiles_generic.cpp \
++	$(FBNEO_BURN_DIR)/tilemap_generic.cpp \
++	$(FBNEO_BURN_DIR)/burn_bitmap.cpp \
++	$(MIDWAY_DIR)/dcs2k.cpp \
++	$(MIDWAY_DIR)/midtunit.cpp \
++	$(MIDWAY_DIR)/d_tunit.cpp
++
++CFLAGS += -DSUBSET=\"$(SUBSET)\" -DSUPPORT_SPLIT_DRIVER -DBUILD_MIDWAY
++CXXFLAGS += -DSUBSET=\"$(SUBSET)\" -DSUPPORT_SPLIT_DRIVER -DBUILD_MIDWAY
+diff --git a/src/burner/libretro/libretro.cpp b/src/burner/libretro/libretro.cpp
+index 9e8983568..7b92bc413 100644
+--- a/src/burner/libretro/libretro.cpp
++++ b/src/burner/libretro/libretro.cpp
+@@ -2638,6 +2638,13 @@ bool retro_load_game_special(unsigned game_type, const struct retro_game_info *i
+ 	return retro_load_game_common();
+ }
+ 
++// nbajamrw widescreen hack: lets a frontend that can be killed without warning (iOS) write the
++// game's CMOS (settings, records) without unloading the game
++extern "C" void nbajamrw_save_nvram(void)
++{
++	if (nBurnDrvActive != ~0U) BurnNvramSave(g_autofs_path);
++}
++
+ void retro_unload_game(void)
+ {
+ 	if (nBurnDrvActive != ~0U)

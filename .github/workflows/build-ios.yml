@@ -1,0 +1,56 @@
+name: Build iOS app (unsigned .ipa)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, nbajam-widescreen ]
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get FinalBurn Neo (libretro) at the base commit and apply the widescreen patch
+        run: |
+          git clone --filter=blob:none https://github.com/libretro/FBNeo.git fbneo
+          cd fbneo
+          git checkout "$(cat ../core/BASE_COMMIT.txt)"
+          git apply ../core/fbneo-nbajamrw.diff
+          cp ../core/nbajamrw_patches.h src/burn/drv/midway/
+
+      - name: Build the core as a static library for iOS (arm64, iOS 17+)
+        run: |
+          cd fbneo/src/burner/libretro
+          make SUBSET=tunit generate-files
+          CCI="$(xcrun -sdk iphoneos -f clang) -isysroot $(xcrun -sdk iphoneos --show-sdk-path) -arch arm64 -mcpu=apple-a12 -miphoneos-version-min=17.0"
+          CXXI="$(xcrun -sdk iphoneos -f clang++) -isysroot $(xcrun -sdk iphoneos --show-sdk-path) -arch arm64 -mcpu=apple-a12 -miphoneos-version-min=17.0"
+          make -j"$(sysctl -n hw.ncpu)" SUBSET=tunit platform=ios-arm64 \
+               CC="$CCI" CXX="$CXXI" AR="$(xcrun -sdk iphoneos -f ar)"
+          mkdir -p "$GITHUB_WORKSPACE/ios/lib"
+          # static library from all objects (incl. libretro-common, which STATIC_LINKING=1 leaves out)
+          find ../.. -name '*.o' -print0 | xargs -0 "$(xcrun -sdk iphoneos -f ar)" rcs "$GITHUB_WORKSPACE/ios/lib/libfbneo.a"
+          file "$GITHUB_WORKSPACE/ios/lib/libfbneo.a"
+
+      - name: Generate the Xcode project and build the app
+        run: |
+          brew install xcodegen
+          cd ios
+          xcodegen generate
+          xcodebuild -project NBAJAMWS.xcodeproj -scheme NBAJAMWS -configuration Release \
+                     -sdk iphoneos -destination 'generic/platform=iOS' \
+                     CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+                     SYMROOT="$PWD/build" build
+
+      - name: Package unsigned .ipa
+        run: |
+          cd ios
+          mkdir -p Payload
+          cp -R build/Release-iphoneos/NBAJAMWS.app Payload/
+          zip -qry NBAJam-Widescreen-unsigned.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NBAJam-Widescreen-ipa
+          path: ios/NBAJam-Widescreen-unsigned.ipa
