@@ -69,10 +69,10 @@ index 306bb91..dc291ff 100644
  			t = BURN_ENDIAN_SWAP_INT16(pst[0]);
  			t <<= 6;										// Get real tile address
 diff --git a/src/burn/drv/capcom/d_cps2.cpp b/src/burn/drv/capcom/d_cps2.cpp
-index 099ded2..0a2045e 100644
+index 099ded2..21b6f60 100644
 --- a/src/burn/drv/capcom/d_cps2.cpp
 +++ b/src/burn/drv/capcom/d_cps2.cpp
-@@ -9918,6 +9918,679 @@ static INT32 Ssf2tInit()
+@@ -9918,6 +9918,705 @@ static INT32 Ssf2tInit()
  	return nRet;
  }
  
@@ -639,8 +639,11 @@ index 099ded2..0a2045e 100644
 +	if (CpsRamFF[0x82dd ^ 1] == 0) CpsRamFF[0x82dd ^ 1] = 1;
 +}
 +
++static INT32 wsSettingsDone = 0;
++static void Ssf2twsDefaultSettings();
 +static INT32 Ssf2twsFrame()
 +{
++	if (!wsSettingsDone) { Ssf2twsDefaultSettings(); wsSettingsDone = 1; }	// after the frontend loaded the NVRAM
 +	Ssf2twsDemoSound();
 +	INT32 nRet = Cps2Frame();                          // strips are done in the post-draw hook
 +	return nRet;
@@ -742,17 +745,40 @@ index 099ded2..0a2045e 100644
 +	return DrvExit();
 +}
 +
++// Default settings: GAME DIFFICULTY 1/EASIEST and GAME SPEED TURBO 0 (arcade factory: 2 and TURBO 1).
++// EEPROM layout (two identical copies at 0x1e and 0x4e): +0/+2 difficulty/speed index, +5 = 1 once the
++// settings were saved (0 = the game re-applies its factory defaults at boot), +0x0d "ASFXE" signature.
++static void Ssf2twsDefaultSettings()
++{
++	static const UINT8 cfg[18] = { 0x00,0x00,0x00,0x00,0x00,0x01,0x01,0x01,0x00,0x00,0x94,0x02,0x17,0x41,0x53,0x46,0x58,0x45 };
++	INT32 blank = 1;	// no saved EEPROM (FBNeo initialises it to 0xff)
++	for (INT32 i = 0; i < 0x80; i++) if (EEPROMReadByte(i) != 0xff) blank = 0;
++	INT32 fresh = blank;
++	if (!fresh) {	// existing EEPROM still on factory settings (never saved from the test menu)?
++		fresh = 1;
++		for (INT32 c = 0; c < 2; c++) {
++			INT32 b = 0x1e + c * 0x30;
++			if (EEPROMReadByte(b + 5) != 0) fresh = 0;
++			for (INT32 i = 13; i < 18; i++) if (EEPROMReadByte(b + i) != cfg[i]) fresh = 0;
++		}
++	}
++	if (!fresh) return;
++	if (blank) EEPROMByteFill(0x00, 0x80);	// as the game itself initialises it
++	for (INT32 c = 0; c < 2; c++)
++		for (INT32 i = 0; i < 18; i++) EEPROMWriteByte(0x1e + c * 0x30 + i, cfg[i]);
++}
++
 +static INT32 Ssf2twsInit()
 +{
 +	INT32 nRet = Ssf2tInit();
-+	if (nRet == 0) { Ssf2twsApplyPatches(); CpsScr1Hook = Ssf2twsScr1; CpsScr1Wide = NULL; CpsPostDrawHook = Ssf2twsPostDraw; wsValid = 0; }
++	if (nRet == 0) { Ssf2twsApplyPatches(); wsSettingsDone = 0; CpsScr1Hook = Ssf2twsScr1; CpsScr1Wide = NULL; CpsPostDrawHook = Ssf2twsPostDraw; wsValid = 0; }
 +	return nRet;
 +}
 +
  static INT32 XmcotaInit()
  {
  	Xmcota = 1;
-@@ -12413,6 +13086,16 @@ struct BurnDriver BurnDrvCpsSsf2t = {
+@@ -12413,6 +13112,16 @@ struct BurnDriver BurnDrvCpsSsf2t = {
  	&CpsRecalcPal, 0x1000, 384, 224, 4, 3
  };
  

@@ -53,8 +53,10 @@ press **L3 + R3** together. Shortcuts: **LB + Start** saves a state, **LB + Coin
 The first controller is player 1 and the second is player 2. When a controller connects, the
 touch controls hide themselves.
 
-The Test Menu is the arcade's own service menu: **3 SYSTEM CONFIGURATION › GAME DIFFICULTY**
-(1 = easiest). Settings and high scores are saved whenever the app goes to the background.
+The game starts on **GAME DIFFICULTY 1/EASIEST** and **GAME SPEED TURBO 0** (the arcade factory
+defaults are 2 and TURBO 1). To change them use the Test Menu, the arcade's own service menu:
+**3 SYSTEM CONFIGURATION**, then EXIT and press START to save. What you save there is kept. Settings
+and high scores are saved whenever the app goes to the background.
 
 Sound plays even with the silent switch on (like a video app). Use the volume buttons to turn it down.
 
