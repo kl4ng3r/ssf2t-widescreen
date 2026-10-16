@@ -128,7 +128,7 @@ static OSStatus audio_render(void *ref, AudioUnitRenderActionFlags *flags, const
 @implementation GameVC {
 	CALayer *_screen; CGColorSpaceRef _cs;
 	CADisplayLink *_link; AudioUnit _au;
-	BOOL _running, _paused, _menuOpen; double _rate, _fps, _acc; CFTimeInterval _lastTick; double _chunkMax; int _ticksSinceExtra;
+	BOOL _running, _paused, _menuOpen; double _rate, _hwRate, _fps, _acc; CFTimeInterval _lastTick; double _chunkMax; int _ticksSinceExtra, _badChunkTicks;
 	UIView *_topCatcher; NSTimer *_hideTimer; BOOL _barShown;
 	int _testFrames; uint16_t _prevCombo;
 	GCVirtualController *_virtual; UIStackView *_bar; UIView *_help;
@@ -376,14 +376,18 @@ static OSStatus audio_render(void *ref, AudioUnitRenderActionFlags *flags, const
 {
 	AVAudioSession *s = AVAudioSession.sharedInstance;
 	[s setCategory:AVAudioSessionCategoryPlayback error:nil];
-	[s setPreferredSampleRate:_rate error:nil];
+	[s setPreferredSampleRate:48000 error:nil];
 	[s setPreferredIOBufferDuration:0.010 error:nil];
 	[s setActive:YES error:nil];
+	// Give the output unit the hardware's own (whole-number) rate and resample the core's
+	// 47980.67 Hz ourselves: RemoteIO's converter, fed that fractional rate, degrades after a
+	// minute or two into 1-frame render calls and the sound stops for good.
+	_hwRate = s.sampleRate > 0 ? s.sampleRate : 48000;
 	AudioComponentDescription d = { kAudioUnitType_Output, kAudioUnitSubType_RemoteIO, kAudioUnitManufacturer_Apple, 0, 0 };
 	AudioComponent c = AudioComponentFindNext(NULL, &d);
 	if (!c || AudioComponentInstanceNew(c, &_au) != noErr) return;
 	AudioStreamBasicDescription f = { 0 };
-	f.mSampleRate = _rate; f.mFormatID = kAudioFormatLinearPCM;
+	f.mSampleRate = _hwRate; f.mFormatID = kAudioFormatLinearPCM;
 	f.mFormatFlags = kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked;
 	f.mFramesPerPacket = 1; f.mChannelsPerFrame = 2; f.mBitsPerChannel = 16; f.mBytesPerFrame = 4; f.mBytesPerPacket = 4;
 	AudioUnitSetProperty(_au, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &f, sizeof f);
@@ -401,6 +405,7 @@ static OSStatus audio_render(void *ref, AudioUnitRenderActionFlags *flags, const
 	dispatch_async(dispatch_get_main_queue(), ^{
 		if (!self->_au || self->_paused) return;
 		[AVAudioSession.sharedInstance setActive:YES error:nil];
+		if (AVAudioSession.sharedInstance.sampleRate != self->_hwRate) { [self audioReset]; return; }
 		AudioOutputUnitStop(self->_au); AudioOutputUnitStart(self->_au);
 	});
 }
@@ -409,6 +414,7 @@ static OSStatus audio_render(void *ref, AudioUnitRenderActionFlags *flags, const
 {
 	dispatch_async(dispatch_get_main_queue(), ^{
 		if (self->_au) { AudioOutputUnitStop(self->_au); AudioComponentInstanceDispose(self->_au); self->_au = NULL; }
+		atomic_store(&g_chunk, 512);
 		if (self->_running) [self startAudio];
 	});
 }
@@ -513,16 +519,20 @@ static uint16_t pad_bits(GCExtendedGamepad *g)
 	_lastTick = now;
 	if (dt < 0) dt = 0;
 	if (dt > 0.1) dt = 0.1;                                          // after a pause / stall
-	double spf = _rate / _fps;                                       // output frames per emulated frame
+	double spf = _hwRate / _fps;                                     // output frames per emulated frame
 	double fill = (double)(atomic_load(&g_rw) - atomic_load(&g_rr));
 	double chunk = atomic_load(&g_chunk);
+	// safety net: tiny render calls mean the output unit is in a bad state -> rebuild it
+	if (chunk < 16) { if (++_badChunkTicks == 60) { _badChunkTicks = -600; [self audioReset]; } }
+	else if (_badChunkTicks > 0) _badChunkTicks = 0;
+	else if (_badChunkTicks < 0) _badChunkTicks++;
 	_chunkMax = chunk > _chunkMax * 0.999 ? chunk : _chunkMax * 0.999;
 	double target = 6 * spf;                                         // ~110 ms of sound buffered
 	if (target < 2.5 * _chunkMax + spf) target = 2.5 * _chunkMax + spf;
 	double adj = (target - fill) / target * 0.01;
 	if (adj > 0.01) adj = 0.01;
 	if (adj < -0.01) adj = -0.01;
-	g_ratio = 1.0 + adj;
+	g_ratio = (_hwRate / _rate) * (1.0 + adj);                       // output / input frames
 	_acc += dt;
 	int runs = 0;
 	while (_acc >= 1.0 / _fps && runs < 6) { _acc -= 1.0 / _fps; runs++; }
@@ -679,7 +689,7 @@ typedef struct { float outW, outH, frameCount, curvature, wiggle, scanroll, vign
 	double fill = (double)(atomic_load(&g_rw) - atomic_load(&g_rr));
 	AVAudioSession *as = AVAudioSession.sharedInstance;
 	NSString *info = [NSString stringWithFormat:@"Audio: %.0f Hz, chunk %u, IO %.0f ms, buffer %.0f ms, gaps %u",
-	                  as.sampleRate, atomic_load(&g_chunk), as.IOBufferDuration * 1000, fill / (_rate > 0 ? _rate : 48000) * 1000, atomic_load(&g_underruns)];
+	                  as.sampleRate, atomic_load(&g_chunk), as.IOBufferDuration * 1000, fill / (_hwRate > 0 ? _hwRate : 48000) * 1000, atomic_load(&g_underruns)];
 	UIAlertController *m = [UIAlertController alertControllerWithTitle:@"NBA Jam TE Widescreen" message:info preferredStyle:UIAlertControllerStyleAlert];
 	__weak GameVC *ws = self;
 	void (^done)(void) = ^{ GameVC *s = ws; if (s) { s->_menuOpen = NO; s->_paused = NO; } };
