@@ -23,7 +23,7 @@ static uint16_t g_pad[PORTS];                  // retro joypad bitmask per port 
 static float g_aspect = 16.0f / 9.0f;
 static int g_loaded;                           // game loaded (safe to save EEPROM)
 
-#define RING 16384                             // audio ring, stereo frames (power of two)
+#define RING 32768                             // audio ring, stereo frames (power of two)
 static int16_t g_ring[RING * 2];
 static _Atomic uint32_t g_rw, g_rr;
 
@@ -124,7 +124,7 @@ static OSStatus audio_render(void *ref, AudioUnitRenderActionFlags *flags, const
 @implementation GameVC {
 	CALayer *_screen; CGColorSpaceRef _cs;
 	CADisplayLink *_link; AudioUnit _au;
-	BOOL _running, _paused, _menuOpen; double _rate, _fps, _acc;
+	BOOL _running, _paused, _menuOpen; double _rate, _fps, _acc; CFTimeInterval _lastTick;
 	UIView *_topCatcher; NSTimer *_hideTimer; BOOL _barShown;
 	int _testFrames; uint16_t _prevCombo;
 	GCVirtualController *_virtual; UIStackView *_bar; UIView *_help;
@@ -475,23 +475,28 @@ static uint16_t pad_bits(GCExtendedGamepad *g)
 	if (!_running || _paused) return;
 	[self readInput];
 	if (_paused) return;
-	// The arcade runs at 54.71 Hz, slower than the display: emulated frames are paced by the
-	// display link's clock (some refreshes run none), and the audio resampler only makes the
-	// small corrections that keep the buffer level steady (dynamic rate control).
-	double hz = 60.0;
-	if (_link.targetTimestamp > _link.timestamp) hz = 1.0 / (_link.targetTimestamp - _link.timestamp);
-	if (hz < 30 || hz > 130) hz = 60.0;
+	// The arcade runs at 54.71 Hz, slower than the display. Emulated frames are paced by the real
+	// time between display-link callbacks (a late or skipped callback still counts), and the audio
+	// buffer level steers both the resampler (up to +-1 %) and, if it drifts too far, the frame count,
+	// so the buffer can neither run dry (crackles, gaps) nor fill up (dropped samples).
+	CFTimeInterval now = _link.timestamp;
+	double dt = _lastTick > 0 ? now - _lastTick : 1.0 / 60.0;
+	_lastTick = now;
+	if (dt < 0) dt = 0;
+	if (dt > 0.1) dt = 0.1;                                          // after a pause / stall
 	double spf = _rate / _fps;                                       // output frames per emulated frame
 	double fill = (double)(atomic_load(&g_rw) - atomic_load(&g_rr));
-	double target = 4 * spf;
-	double adj = (target - fill) / target * 0.005;                   // up to +-0.5 % to hold the level
-	if (adj > 0.005) adj = 0.005; if (adj < -0.005) adj = -0.005;
+	double target = 6 * spf;                                         // ~110 ms of sound buffered
+	double adj = (target - fill) / target * 0.01;
+	if (adj > 0.01) adj = 0.01;
+	if (adj < -0.01) adj = -0.01;
 	g_ratio = 1.0 + adj;
-	_acc += 1.0 / hz;
+	_acc += dt;
 	int runs = 0;
-	while (_acc >= 1.0 / _fps && runs < 3) { _acc -= 1.0 / _fps; runs++; }
-	if (_acc > 0.1) _acc = 0;                                        // after a stall: don't race to catch up
-	if (fill < spf && runs == 0) runs = 1;                           // underrun (e.g. after a pause)
+	while (_acc >= 1.0 / _fps && runs < 6) { _acc -= 1.0 / _fps; runs++; }
+	if (_acc > 0.2) _acc = 0;
+	if (fill < 1.5 * spf && runs < 6) runs++;                         // nearly empty: one more frame
+	if (fill > 2.5 * target) runs = 0;                                // far too full: skip a frame
 	for (int i = 0; i < runs; i++) retro_run();
 	if (g_newFrame && g_frame && _crtOn && _pCrt) {
 		g_newFrame = 0;

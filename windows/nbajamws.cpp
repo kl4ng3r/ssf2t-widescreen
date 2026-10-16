@@ -155,7 +155,7 @@ static float g_aspect = 128.0f / 75.0f;
 static bool g_loaded;
 static double g_fps = 54.71, g_rate = 48000;
 
-#define RING 16384
+#define RING 32768
 static int16_t g_ring[RING * 2];
 static std::atomic<uint32_t> g_rw(0), g_rr(0);
 static double g_ratio = 1.0, g_pos = 0.0;
@@ -929,14 +929,16 @@ int main(int argc, char **argv)
 		if (g_loaded && !g_menuOpen) {
 			double spf = g_rate / g_fps;
 			double fill = (double)(g_rw.load() - g_rr.load());
-			double target = 4 * spf;
-			double adj = (target - fill) / target * 0.005;
-			if (adj > 0.005) adj = 0.005;
-			if (adj < -0.005) adj = -0.005;
+			double target = 6 * spf;
+			double adj = (target - fill) / target * 0.01;
+			if (adj > 0.01) adj = 0.01;
+			if (adj < -0.01) adj = -0.01;
 			g_ratio = 1.0 + adj;
-			acc += dt;
-			while (acc >= 1.0 / g_fps && runs < 3) { acc -= 1.0 / g_fps; runs++; }
-			if (acc > 0.1) acc = 0;
+			acc += dt < 0.1 ? dt : 0.1;
+			while (acc >= 1.0 / g_fps && runs < 6) { acc -= 1.0 / g_fps; runs++; }
+			if (acc > 0.2) acc = 0;
+			if (fill < 1.5 * spf && runs < 6) runs++;                  // nearly empty: one more frame
+			if (fill > 2.5 * target) runs = 0;                          // far too full: skip a frame
 			if (shotPath) runs = 1;                                     // test mode: one frame per loop
 			for (int i = 0; i < runs; i++) { retro_run(); framesRun++; }
 		} else acc = 0;

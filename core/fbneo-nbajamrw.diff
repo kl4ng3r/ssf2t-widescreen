@@ -111,7 +111,7 @@ index bdca0155a..1f31397fc 100644
  	{ "l2_nba_jam_tournament_game_rom_uj12.uj12",	0x080000, 0xeaa6fb32, 1 | BRF_PRG | BRF_ESS }, //  0 TMS34010
  	{ "l2_nba_jam_tournament_game_rom_ug12.ug12",	0x080000, 0x5a694d9a, 1 | BRF_PRG | BRF_ESS }, //  1
 diff --git a/src/burn/drv/midway/midtunit.cpp b/src/burn/drv/midway/midtunit.cpp
-index af93a99fd..e0f3ae591 100644
+index af93a99fd..229c1bfc5 100644
 --- a/src/burn/drv/midway/midtunit.cpp
 +++ b/src/burn/drv/midway/midtunit.cpp
 @@ -67,6 +67,11 @@ UINT8 TUnitIsMK2 = 0;
@@ -119,14 +119,14 @@ index af93a99fd..e0f3ae591 100644
  UINT8 TUnitIsNbajamp = 0;
  UINT8 TUnitIsNbajamTe = 0;
 +UINT8 TUnitWide = 0;          // widescreen hack (nbajamrw)
-+static INT32 nWsDrawPage = 0;   // VRAM page the game is drawing into
-+static INT32 nWsCourt[2] = { 0, 0 };   // page holds a court (full-width) picture
++static UINT32 nWsFrame = 0;      // emulated frame counter
++static UINT32 nWsFloorFrame = 0; // last frame in which the court floor was drawn (+1; 0 = never)
 +static UINT8 nWsLineCourt[256];        // per screen line: shown full width
 +static void TUnitWsApplyPatches();
  UINT8 TUnitIsJdreddp = 0;
  
  static INT32 vb_start = 0;
-@@ -537,6 +542,18 @@ static INT32 ScanlineRender(INT32 line, TMS34010Display *info)
+@@ -537,6 +542,20 @@ static INT32 ScanlineRender(INT32 line, TMS34010Display *info)
  
  	if (!info->enabled) heblnk = hsblnk; // blank line!
  
@@ -136,7 +136,9 @@ index af93a99fd..e0f3ae591 100644
 +		// Only the court is drawn full width; other screens are 400 pixels wide with stale or
 +		// partial graphics beside them, so their side strips are shown black.
 +		// (palette entry 0 is not always black, so TUnitDraw blacks them out after the colour conversion)
-+		nWsLineCourt[line] = nWsCourt[(info->rowaddr >> 8) & 1];
++		// the court floor was drawn this frame or in the last two (the picture shown is the one
++		// drawn in the previous frame; screen shakes and high shots move it between VRAM pages)
++		nWsLineCourt[line] = nWsFloorFrame && (nWsFrame - (nWsFloorFrame - 1)) <= 2;
 +		for (INT32 x = 0; x < nScreenWidth; x++)
 +			dest[x] = BURN_ENDIAN_SWAP_INT16(src[x] & BURN_ENDIAN_SWAP_INT16(0x7FFF));
 +		return 0;
@@ -145,7 +147,7 @@ index af93a99fd..e0f3ae591 100644
  	if ((hsblnk - heblnk) < nScreenWidth) {
  		for (INT32 x = 0; x < nScreenWidth; x++) {
  			dest[x] = 0;
-@@ -1172,11 +1189,36 @@ INT32 TUnitInit()
+@@ -1172,11 +1191,36 @@ INT32 TUnitInit()
  
  	GenericTilesInit();
  
@@ -182,16 +184,16 @@ index af93a99fd..e0f3ae591 100644
  static void MakeInputs()
  {
  	service.Toggle(nTUnitJoy2[4]);
-@@ -1219,6 +1261,8 @@ INT32 TUnitExit()
+@@ -1219,6 +1263,8 @@ INT32 TUnitExit()
  	TUnitIsNbajamp = 0;
  	TUnitIsNbajamTe = 0;
  	TUnitIsJdreddp = 0;
 +	TUnitWide = 0;
-+	nWsCourt[0] = nWsCourt[1] = 0;
++	nWsFrame = nWsFloorFrame = 0;
  
  	SoundProtAddressStart = 0;
  	SoundProtAddressEnd = 0;
-@@ -1236,6 +1280,16 @@ INT32 TUnitDraw()
+@@ -1236,6 +1282,16 @@ INT32 TUnitDraw()
  	// TMS34010 renders scanlines direct to pTransDraw
  	BurnTransferCopy(DrvPaletteB);
  
@@ -208,13 +210,21 @@ index af93a99fd..e0f3ae591 100644
  	return 0;
  }
  
-@@ -1352,6 +1406,10 @@ INT32 TUnitScan(INT32 nAction, INT32 *pnMin)
+@@ -1247,6 +1303,7 @@ static void HandleDCSIRQ(INT32 line)
+ INT32 TUnitFrame()
+ {
+ 	if (nTUnitReset) TUnitDoReset();
++	nWsFrame++;
+ 
+ 	MakeInputs();
+ 
+@@ -1352,6 +1409,10 @@ INT32 TUnitScan(INT32 nAction, INT32 *pnMin)
  		SCAN_VAR(JdreddpProtTable);
  
  		SCAN_VAR(nExtraCycles);
 +		if (TUnitWide) {
-+			SCAN_VAR(nWsDrawPage);
-+			SCAN_VAR(nWsCourt);
++			SCAN_VAR(nWsFrame);
++			SCAN_VAR(nWsFloorFrame);
 +		}
  
  		service.Scan();
@@ -238,20 +248,17 @@ index 24aef0289..89250c1e0 100644
  extern UINT8 TUnitIsJdreddp;
 +extern UINT8 TUnitWide;
 diff --git a/src/burn/drv/midway/midtunit_dma.h b/src/burn/drv/midway/midtunit_dma.h
-index c9d8fca22..5a9420aa3 100644
+index c9d8fca22..f35c7202f 100644
 --- a/src/burn/drv/midway/midtunit_dma.h
 +++ b/src/burn/drv/midway/midtunit_dma.h
-@@ -383,6 +383,19 @@ static void TUnitDmaWrite(UINT32 address, UINT16 value)
+@@ -383,6 +383,16 @@ static void TUnitDmaWrite(UINT32 address, UINT16 value)
      dma_state->botclip = nDMA[DMA_BOTCLIP] & 0x1ff;
      dma_state->leftclip = nDMA[DMA_LEFTCLIP] & 0x3ff;
      dma_state->rightclip = nDMA[DMA_RIGHTCLIP] & 0x3ff;
 +    if (TUnitWide) {
-+        // widescreen: remember which VRAM page (rows 0-255 / 256-511) holds a court picture.
-+        // The court floor is the only thing drawn as 512x1 lines at x 0 (patched floor routine);
-+        // the first blit into the other page starts a new picture there.
-+        INT32 page = (dma_state->ypos >> 8) & 1;
-+        if (page != nWsDrawPage) { nWsDrawPage = page; nWsCourt[page] = 0; }
-+        if (dma_state->width == 512 && dma_state->height == 1 && dma_state->xpos == 0) nWsCourt[page] = 1;
++        // widescreen: the court floor is the only thing drawn as 512x1 lines at x 0 (patched
++        // floor routine); screens without it are 400 pixels wide (side strips shown black)
++        if (dma_state->width == 512 && dma_state->height == 1 && dma_state->xpos == 0) nWsFloorFrame = nWsFrame + 1;
 +
 +        // widescreen: a clip at the edge of the 400-pixel picture (VRAM columns 56-455)
 +        // is moved to the edge of the 512-pixel row
