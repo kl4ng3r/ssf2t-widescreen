@@ -3,7 +3,7 @@ name: Build Windows launcher (NBAJamWS.exe)
 on:
   workflow_dispatch:
   push:
-    branches: [ main ]
+    branches: [ main, nbajam-widescreen ]
 
 jobs:
   build:
