@@ -25,6 +25,7 @@
 #endif
 
 extern "C" void nbajamrw_save_nvram(void);
+extern "C" int nbajamrw_pause_players(void);
 
 // ------------------------------------------------------------------ OpenGL 3.3 (loaded via SDL)
 typedef unsigned int GLenum; typedef unsigned int GLuint; typedef int GLint; typedef int GLsizei;
@@ -541,6 +542,7 @@ static int g_mouseX = -1, g_mouseY = -1; static int g_mouseDownBtn = -1;
 static uint16_t g_clickBits;                       // coin / start held with the mouse
 
 static bool g_menuOpen; static int g_menuSel;
+static bool g_userPaused;                         // paused with Start by a player in the game
 static std::vector<std::string> g_menuItems;
 static std::string g_toast; static Uint32 g_toastAt;
 static void toast(const std::string &s) { g_toast = s; g_toastAt = SDL_GetTicks(); }
@@ -585,7 +587,7 @@ static void menu_build()
 		std::string("Fullscreen: ") + (g_fullscreen ? "On" : "Off"),
 		"Test Menu (difficulty, free play...)", "Reset", "Quit" };
 }
-static void menu_open() { if (g_menuOpen) return; g_menuOpen = true; g_menuSel = 0; menu_build(); show_bar(); }
+static void menu_open() { if (g_menuOpen) return; g_menuOpen = true; g_userPaused = false; g_menuSel = 0; menu_build(); show_bar(); }
 static void menu_rect(int i, float &x, float &y, float &w, float &h)
 {
 	float s = ui_scale(); w = 520 * s; h = 46 * s;
@@ -624,6 +626,16 @@ static void draw_toast()
 	fill(x, y, w, h, 0, 0, 0, 0.7f);
 	text(g_toast.c_str(), x + 16 * s, y + (h - px) / 2, px, 1, 1, 1, 1);
 }
+static void draw_paused()
+{
+	if (!g_userPaused || g_menuOpen) return;
+	float s = ui_scale(), px = 44 * s, px2 = 20 * s;
+	const char *t = "PAUSED", *t2 = "Press Start to resume";
+	float w = text_width(t2, px2) + 60 * s, h = px + px2 + 50 * s, x = (g_W - w) / 2, y = (g_H - h) / 2;
+	fill(x, y, w, h, 0, 0, 0, 0.6f);
+	text(t, (g_W - text_width(t, px)) / 2, y + 18 * s, px, 1, 1, 1, 1);
+	text(t2, (g_W - text_width(t2, px2)) / 2, y + 26 * s + px, px2, 0.85f, 0.85f, 0.85f, 1);
+}
 static void draw_lines(const std::vector<std::string> &lines)
 {
 	float s = ui_scale(), px = 24 * s, y = (g_H - lines.size() * px * 1.5f) / 2;
@@ -633,6 +645,25 @@ static void draw_lines(const std::vector<std::string> &lines)
 // ------------------------------------------------------------------ input
 static SDL_GameController *g_pads[PORTS];
 static uint16_t g_prevCombo; static int g_testFrames;
+
+// Start pauses and resumes the game for players who are in it while a quarter is being played (the
+// game ignores their Start then). Everyone else's Start still goes to the game, so other players
+// can join at any time.
+static int g_pauseMask; static uint16_t g_prevStart;
+static void pause_input(uint16_t *st)
+{
+	const uint16_t sb = 1 << RETRO_DEVICE_ID_JOYPAD_START;
+	int mask = g_userPaused ? g_pauseMask : (g_loaded ? nbajamrw_pause_players() : 0);
+	bool toggle = false;
+	for (int i = 0; i < PORTS; i++) {
+		bool down = (st[i] & sb) != 0, was = (g_prevStart >> i) & 1;
+		if (down) g_prevStart |= 1 << i; else g_prevStart &= ~(1 << i);
+		if (!(mask & (1 << i))) continue;
+		if (down && !was) toggle = true;
+		st[i] &= ~sb;
+	}
+	if (toggle) { g_userPaused = !g_userPaused; g_pauseMask = mask; if (g_userPaused) show_bar(); }
+}
 
 static void pads_refresh()
 {
@@ -916,6 +947,7 @@ int main(int argc, char **argv)
 		if (pressed & 4) load_state();
 		if (!g_menuOpen) { st[0] |= key_bits(0) | g_clickBits; st[1] |= key_bits(1); }
 		else for (int i = 0; i < PORTS; i++) st[i] = 0;
+		if (!g_menuOpen) pause_input(st);
 		if (optCoin && framesRun >= 60 && framesRun < 66) st[0] |= 1 << RETRO_DEVICE_ID_JOYPAD_B;   // test: skip the CMOS notice
 		if (g_testFrames > 0) {
 			st[0] = (1 << RETRO_DEVICE_ID_JOYPAD_START) | (1 << RETRO_DEVICE_ID_JOYPAD_L) | (1 << RETRO_DEVICE_ID_JOYPAD_R);
@@ -927,7 +959,7 @@ int main(int argc, char **argv)
 		Uint64 now = SDL_GetPerformanceCounter();
 		double dt = (double)(now - last) / freq; last = now;
 		int runs = 0;
-		if (g_loaded && !g_menuOpen) {
+		if (g_loaded && !g_menuOpen && !g_userPaused) {
 			double spf = g_rate / g_fps;
 			double fill = (double)(g_rw.load() - g_rr.load());
 			double target = 6 * spf;
@@ -959,6 +991,7 @@ int main(int argc, char **argv)
 			if (!g_loadError.empty()) { lines.push_back(""); lines.push_back(g_loadError); }
 			draw_lines(lines);
 		} else {
+			draw_paused();
 			draw_bar();
 			draw_menu();
 			draw_toast();

@@ -111,7 +111,7 @@ index bdca0155a..1f31397fc 100644
  	{ "l2_nba_jam_tournament_game_rom_uj12.uj12",	0x080000, 0xeaa6fb32, 1 | BRF_PRG | BRF_ESS }, //  0 TMS34010
  	{ "l2_nba_jam_tournament_game_rom_ug12.ug12",	0x080000, 0x5a694d9a, 1 | BRF_PRG | BRF_ESS }, //  1
 diff --git a/src/burn/drv/midway/midtunit.cpp b/src/burn/drv/midway/midtunit.cpp
-index af93a99fd..dbc3906f5 100644
+index af93a99fd..5c851b946 100644
 --- a/src/burn/drv/midway/midtunit.cpp
 +++ b/src/burn/drv/midway/midtunit.cpp
 @@ -67,6 +67,11 @@ UINT8 TUnitIsMK2 = 0;
@@ -147,7 +147,7 @@ index af93a99fd..dbc3906f5 100644
  	if ((hsblnk - heblnk) < nScreenWidth) {
  		for (INT32 x = 0; x < nScreenWidth; x++) {
  			dest[x] = 0;
-@@ -1172,11 +1191,36 @@ INT32 TUnitInit()
+@@ -1172,11 +1191,48 @@ INT32 TUnitInit()
  
  	GenericTilesInit();
  
@@ -158,6 +158,18 @@ index af93a99fd..dbc3906f5 100644
  	return 0;
  }
  
++// ---- Pause for the launchers (nbajamrw): the players whose Start may pause the game, as a bit mask
++// (bit 0 = player 1). These are the human players while a quarter is being played (game state 3 at
++// 10E58B0h, human players at 10E62D0h); the game itself ignores their Start then, so pausing on it
++// takes nothing away. Everyone else's Start (joining, buying time) still goes to the game.
++extern "C" INT32 nbajamrw_pause_players(void)
++{
++	if (!TUnitWide || !DrvRAM) return 0;
++	UINT16 state   = BURN_ENDIAN_SWAP_INT16(*(UINT16 *)(DrvRAM + ((0x10E58B0 - 0x1000000) >> 3)));
++	UINT16 players = BURN_ENDIAN_SWAP_INT16(*(UINT16 *)(DrvRAM + ((0x10E62D0 - 0x1000000) >> 3)));
++	return state == 3 ? (players & 0x0f) : 0;
++}
++
 +// ---- Widescreen hack (nbajamrw): game-code patches, verified against the original words first.
 +// If any word does not match (different ROM revision), nothing is patched.
 +struct WsPatch { UINT32 addr; UINT16 orig; UINT16 val; };
@@ -184,7 +196,7 @@ index af93a99fd..dbc3906f5 100644
  static void MakeInputs()
  {
  	service.Toggle(nTUnitJoy2[4]);
-@@ -1219,6 +1263,8 @@ INT32 TUnitExit()
+@@ -1219,6 +1275,8 @@ INT32 TUnitExit()
  	TUnitIsNbajamp = 0;
  	TUnitIsNbajamTe = 0;
  	TUnitIsJdreddp = 0;
@@ -193,7 +205,7 @@ index af93a99fd..dbc3906f5 100644
  
  	SoundProtAddressStart = 0;
  	SoundProtAddressEnd = 0;
-@@ -1236,6 +1282,16 @@ INT32 TUnitDraw()
+@@ -1236,6 +1294,16 @@ INT32 TUnitDraw()
  	// TMS34010 renders scanlines direct to pTransDraw
  	BurnTransferCopy(DrvPaletteB);
  
@@ -210,7 +222,7 @@ index af93a99fd..dbc3906f5 100644
  	return 0;
  }
  
-@@ -1247,6 +1303,7 @@ static void HandleDCSIRQ(INT32 line)
+@@ -1247,6 +1315,7 @@ static void HandleDCSIRQ(INT32 line)
  INT32 TUnitFrame()
  {
  	if (nTUnitReset) TUnitDoReset();
@@ -218,7 +230,7 @@ index af93a99fd..dbc3906f5 100644
  
  	MakeInputs();
  
-@@ -1352,6 +1409,10 @@ INT32 TUnitScan(INT32 nAction, INT32 *pnMin)
+@@ -1352,6 +1421,10 @@ INT32 TUnitScan(INT32 nAction, INT32 *pnMin)
  		SCAN_VAR(JdreddpProtTable);
  
  		SCAN_VAR(nExtraCycles);
@@ -229,7 +241,7 @@ index af93a99fd..dbc3906f5 100644
  
  		service.Scan();
  	}
-@@ -1369,3 +1430,4 @@ INT32 TUnitScan(INT32 nAction, INT32 *pnMin)
+@@ -1369,3 +1442,4 @@ INT32 TUnitScan(INT32 nAction, INT32 *pnMin)
  
  	return 0;
  }

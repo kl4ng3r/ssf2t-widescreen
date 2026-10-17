@@ -13,6 +13,7 @@
 #include "romcheck.h"
 
 extern void nbajamrw_save_nvram(void);
+extern int nbajamrw_pause_players(void);
 
 // ---------------------------------------------------------------- core glue (C)
 static char g_dir[1024];                       // Documents: system/save dir and ROM location
@@ -131,6 +132,7 @@ static OSStatus audio_render(void *ref, AudioUnitRenderActionFlags *flags, const
 	BOOL _running, _paused, _menuOpen; double _rate, _hwRate, _fps, _acc; CFTimeInterval _lastTick; double _chunkMax; int _ticksSinceExtra, _badChunkTicks;
 	UIView *_topCatcher; NSTimer *_hideTimer; BOOL _barShown;
 	int _testFrames; uint16_t _prevCombo;
+	BOOL _userPaused; int _pauseMask; uint16_t _prevStart; UILabel *_pauseLabel;   // Start pause
 	GCVirtualController *_virtual; UIStackView *_bar; UIView *_help;
 	uint16_t _touchBits;                         // coin/start held via on-screen buttons
 	// CRT filter (newpixie, Metal; see newpixie.metal)
@@ -211,6 +213,26 @@ static OSStatus audio_render(void *ref, AudioUnitRenderActionFlags *flags, const
 	press.minimumPressDuration = 0; press.cancelsTouchesInView = NO;
 	[_topCatcher addGestureRecognizer:press];
 	[self showBar];
+
+	// "PAUSED" overlay (Start pressed by a player who is in the game)
+	_pauseLabel = [[UILabel alloc] init];
+	_pauseLabel.text = @"PAUSED\nPress Start to resume";
+	_pauseLabel.numberOfLines = 2;
+	NSMutableAttributedString *pt = [[NSMutableAttributedString alloc] initWithString:_pauseLabel.text
+		attributes:@{ NSFontAttributeName: [UIFont boldSystemFontOfSize:36], NSForegroundColorAttributeName: UIColor.whiteColor }];
+	[pt addAttributes:@{ NSFontAttributeName: [UIFont systemFontOfSize:16], NSForegroundColorAttributeName: [UIColor colorWithWhite:0.85 alpha:1] }
+	            range:NSMakeRange(7, pt.length - 7)];
+	_pauseLabel.attributedText = pt;
+	_pauseLabel.backgroundColor = [UIColor colorWithWhite:0 alpha:0.6];
+	_pauseLabel.textAlignment = NSTextAlignmentCenter;
+	_pauseLabel.layer.cornerRadius = 12; _pauseLabel.clipsToBounds = YES;
+	_pauseLabel.hidden = YES;
+	_pauseLabel.translatesAutoresizingMaskIntoConstraints = NO;
+	[self.view addSubview:_pauseLabel];
+	[NSLayoutConstraint activateConstraints:@[
+		[_pauseLabel.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+		[_pauseLabel.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor],
+		[_pauseLabel.widthAnchor constraintEqualToConstant:260], [_pauseLabel.heightAnchor constraintEqualToConstant:100] ]];
 
 	NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
 	[nc addObserver:self selector:@selector(controllersChanged) name:GCControllerDidConnectNotification object:nil];
@@ -476,6 +498,22 @@ static uint16_t pad_bits(GCExtendedGamepad *g)
 		st[0] = pad_bits(_virtual.controller.extendedGamepad);
 	}
 	st[0] |= _touchBits;
+	// Start pauses and resumes the game for players who are in it while a quarter is being played
+	// (the game ignores their Start then). Everyone else's Start still goes to the game, so other
+	// players can join at any time.
+	{
+		const uint16_t sb = 1 << RETRO_DEVICE_ID_JOYPAD_START;
+		int mask = _userPaused ? _pauseMask : (g_loaded ? nbajamrw_pause_players() : 0);
+		BOOL toggle = NO;
+		for (int i = 0; i < PORTS; i++) {
+			BOOL down = (st[i] & sb) != 0, was = (_prevStart >> i) & 1;
+			if (down) _prevStart |= 1 << i; else _prevStart &= ~(1 << i);
+			if (!(mask & (1 << i))) continue;
+			if (down && !was) toggle = YES;
+			st[i] &= ~sb;
+		}
+		if (toggle) { _pauseMask = mask; [self setUserPaused:!_userPaused]; }
+	}
 	uint16_t pressed = combo & ~_prevCombo; _prevCombo = combo;
 	if (pressed & 1) [self showMenu];
 	if (pressed & 2) [self saveState];
@@ -503,12 +541,19 @@ static uint16_t pad_bits(GCExtendedGamepad *g)
 	_barShown = NO; _bar.userInteractionEnabled = NO;
 	[UIView animateWithDuration:0.4 animations:^{ self->_bar.alpha = 0.0; }];
 }
+- (void)setUserPaused:(BOOL)p
+{
+	_userPaused = p;
+	_pauseLabel.hidden = !p;
+	if (p) [self showBar];
+}
 // ---------------------------------------------------------------- main loop
 - (void)tick
 {
 	if (!_running || _paused) return;
 	[self readInput];
 	if (_paused) return;
+	if (_userPaused) { _lastTick = 0; _acc = 0; return; }
 	// The arcade runs at 54.71 Hz. Emulated frames are paced only by the real time between
 	// display-link callbacks (a late or skipped callback still counts). The audio buffer is kept at
 	// a level that covers the chunk size iOS currently pulls (it grows them when the screen dims or
@@ -686,6 +731,7 @@ typedef struct { float outW, outH, frameCount, curvature, wiggle, scanroll, vign
 {
 	if (_menuOpen) return;
 	_menuOpen = YES; _paused = YES;
+	[self setUserPaused:NO];
 	double fill = (double)(atomic_load(&g_rw) - atomic_load(&g_rr));
 	AVAudioSession *as = AVAudioSession.sharedInstance;
 	NSString *info = [NSString stringWithFormat:@"Audio: %.0f Hz, chunk %u, IO %.0f ms, buffer %.0f ms, gaps %u",

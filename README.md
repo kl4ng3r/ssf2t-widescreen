@@ -50,6 +50,10 @@ Needs a graphics card with OpenGL 3.3 (anything from the last ~12 years).
 
 Up to 4 controllers: controller 1 is player 1, and so on (the keyboard also controls players 1 and 2).
 
+**Pause:** while a quarter is being played, Start pauses the game when it is pressed by a player who
+is in the game (the arcade ignores their Start then); Start from any of those players resumes it.
+Start from a player who is not playing still goes to the game, so others can join in at any time.
+
 * **Esc** (or the controller's Guide button, or L3 + R3): menu – resume, save / load state, CRT
   filter, fullscreen, the arcade's test menu (difficulty, free play, etc.), reset, quit.
 * **F2** save state, **F4** load state (controller: LB + Start / LB + Back), **F3** CRT filter,
@@ -74,7 +78,7 @@ Same procedure as the SSF2T app; GitHub's free Mac build machines compile it.
 4. Open the app, tap **Import patched nbajamte2.zip** and pick your patched zip (any file name).
 
 Controls on iOS: up to 4 controllers (same layout as above: A shoot, X/Y pass, B/RB/triggers turbo,
-Options/Share = coin, Menu = start). Without a controller, an on-screen pad appears (A shoot,
+Options/Share = coin, Menu = start; Start pauses as described above). Without a controller, an on-screen pad appears (A shoot,
 X pass, B turbo). **COIN / START / MENU / CRT** buttons sit at the top (tap the top of the screen to
 show them). L3 + R3 opens the menu, LB + Start saves a state, LB + Coin loads it.
 
